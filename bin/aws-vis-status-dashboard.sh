@@ -1,0 +1,1 @@
+/home/passa/Documents/projects/DGB/scripts/src/aws/vis/status-dashboard.sh
