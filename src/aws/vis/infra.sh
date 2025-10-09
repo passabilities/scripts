@@ -70,12 +70,21 @@ discover_all_resources() {
 
     # Discover VPC(s)
     if is_filtering_by_project; then
-        local vpc_name="${PROJECT_NAME}-vpc"
+        # Search by Project tag, or by name pattern (with or without environment)
         vpc_ids=$(aws ec2 describe-vpcs \
             --region "$AWS_REGION" \
-            --filters "Name=tag:Name,Values=$vpc_name" \
+            --filters "Name=tag:Project,Values=$PROJECT_NAME" \
             --query 'Vpcs[*].VpcId' \
             --output text 2>/dev/null || echo "")
+
+        # If no VPCs found by Project tag, try name-based search (with and without environment)
+        if [ -z "$vpc_ids" ]; then
+            vpc_ids=$(aws ec2 describe-vpcs \
+                --region "$AWS_REGION" \
+                --filters "Name=tag:Name,Values=${PROJECT_NAME}-vpc-*,${PROJECT_NAME}-vpc" \
+                --query 'Vpcs[*].VpcId' \
+                --output text 2>/dev/null || echo "")
+        fi
     else
         # Discover ALL VPCs
         vpc_ids=$(aws ec2 describe-vpcs \
@@ -162,25 +171,26 @@ discover_all_resources() {
 
     # Discover RDS instances (outside VPC loop as RDS may not be in discovered VPCs)
     if is_filtering_by_project; then
-        local db_identifier="${PROJECT_NAME}-db"
-        local db_info=$(aws rds describe-db-instances \
+        # Get all RDS instances and filter by project name pattern
+        local all_db_instances=$(aws rds describe-db-instances \
             --region "$AWS_REGION" \
-            --db-instance-identifier "$db_identifier" \
-            --query 'DBInstances[0].[DBInstanceIdentifier,DBInstanceStatus,VpcId,VpcSecurityGroups[0].VpcSecurityGroupId,DBSubnetGroup.Subnets[*].SubnetIdentifier]' \
-            --output text 2>/dev/null || echo "")
+            --query 'DBInstances[*].[DBInstanceIdentifier,DBInstanceStatus,DBInstanceClass,VpcId,VpcSecurityGroups[0].VpcSecurityGroupId,DBSubnetGroup.Subnets[*].SubnetIdentifier]' \
+            --output text 2>/dev/null)
 
-        if [ -n "$db_info" ]; then
-            local db_vpc_id db_sg_id subnet_ids
-            IFS=$'\t' read -r db_id status db_vpc_id db_sg_id subnet_ids <<< "$db_info"
+        while IFS=$'\t' read -r db_id status db_class db_vpc_id db_sg_id subnet_ids; do
+            [ -z "$db_id" ] && continue
 
-            add_resource "RDS" "$db_id" "PostgreSQL Database" "$status"
-            [ -n "$db_vpc_id" ] && add_relationship "RDS" "$db_id" "VPC" "$db_vpc_id" "deployed in"
-            [ -n "$db_sg_id" ] && add_relationship "RDS" "$db_id" "SG" "$db_sg_id" "protected by"
+            # Filter by project name pattern (with or without environment)
+            if [[ "$db_id" == "${PROJECT_NAME}-db"* ]] || [[ "$db_id" == "${PROJECT_NAME}-"*"-db" ]]; then
+                add_resource "RDS" "$db_id" "$db_class Database" "$status"
+                [ -n "$db_vpc_id" ] && add_relationship "RDS" "$db_id" "VPC" "$db_vpc_id" "deployed in"
+                [ -n "$db_sg_id" ] && add_relationship "RDS" "$db_id" "SG" "$db_sg_id" "protected by"
 
-            for subnet_id in $subnet_ids; do
-                [ -n "$subnet_id" ] && add_relationship "RDS" "$db_id" "Subnet" "$subnet_id" "uses"
-            done
-        fi
+                for subnet_id in $subnet_ids; do
+                    [ -n "$subnet_id" ] && add_relationship "RDS" "$db_id" "Subnet" "$subnet_id" "uses"
+                done
+            fi
+        done <<< "$all_db_instances"
     else
         # Discover ALL RDS instances
         local all_db_instances=$(aws rds describe-db-instances \
@@ -202,29 +212,32 @@ discover_all_resources() {
 
     # Discover ElastiCache clusters
     if is_filtering_by_project; then
-        local cache_id="${PROJECT_NAME}-redis"
-        local cache_info=$(aws elasticache describe-replication-groups \
+        # Get all ElastiCache clusters and filter by project name pattern
+        local all_cache_clusters=$(aws elasticache describe-replication-groups \
             --region "$AWS_REGION" \
-            --replication-group-id "$cache_id" \
-            --query 'ReplicationGroups[0].[ReplicationGroupId,Status]' \
-            --output text 2>/dev/null || echo "")
+            --query 'ReplicationGroups[*].[ReplicationGroupId,Status,CacheNodeType]' \
+            --output text 2>/dev/null)
 
-        if [ -n "$cache_info" ]; then
-            IFS=$'\t' read -r repl_id status <<< "$cache_info"
+        while IFS=$'\t' read -r repl_id status node_type; do
+            [ -z "$repl_id" ] && continue
 
-            add_resource "Cache" "$repl_id" "Redis Cluster" "$status"
+            # Filter by project name pattern (redis, cache, elasticache, etc.)
+            if [[ "$repl_id" == "${PROJECT_NAME}-"*"redis"* ]] || [[ "$repl_id" == "${PROJECT_NAME}-"*"cache"* ]]; then
+                add_resource "Cache" "$repl_id" "$node_type Cluster" "$status"
 
-            # Get cache security groups and VPC info
-            local cache_sgs=$(aws elasticache describe-cache-clusters \
-                --region "$AWS_REGION" \
-                --query "CacheClusters[?ReplicationGroupId=='${cache_id}'].SecurityGroups[*].SecurityGroupId" \
-                --output text 2>/dev/null)
+                # Get cache security groups
+                local cache_sgs=$(aws elasticache describe-cache-clusters \
+                    --region "$AWS_REGION" \
+                    --query "CacheClusters[?ReplicationGroupId=='${repl_id}'].SecurityGroups[*].SecurityGroupId" \
+                    --output text 2>/dev/null)
 
-            for sg_id in $cache_sgs; do
-                [ -n "$sg_id" ] && add_relationship "Cache" "$repl_id" "SG" "$sg_id" "protected by"
-            done
-        fi
+                for sg_id in $cache_sgs; do
+                    [ -n "$sg_id" ] && add_relationship "Cache" "$repl_id" "SG" "$sg_id" "protected by"
+                done
+            fi
+        done <<< "$all_cache_clusters"
     else
+
         # Discover ALL ElastiCache clusters
         local all_cache_clusters=$(aws elasticache describe-replication-groups \
             --region "$AWS_REGION" \
@@ -413,6 +426,7 @@ print_architecture_diagram() {
             RDS) has_rds=true ;;
             Cache) has_cache=true ;;
             EB-Env) has_eb=true ;;
+            EB-App) has_eb=true ;;
             S3) has_s3=true ;;
             SES) has_ses=true ;;
         esac
@@ -425,8 +439,21 @@ print_architecture_diagram() {
     echo -e "${BOLD}${CYAN}║${NC}                               ${GRAY}│${NC}"
 
     if [ "$has_vpc" = true ]; then
+        # Determine VPC label based on filter mode
+        local vpc_display
+        if [ "$FILTER_BY_PROJECT" = "true" ] && [ -n "$PROJECT_NAME" ]; then
+            vpc_display="${PROJECT_NAME}-vpc"
+        else
+            vpc_display="All VPCs"
+        fi
+
         echo -e "${BOLD}${CYAN}║${NC}     ${GREEN}╔═══════════════════════════════════════════════════╗${NC}"
-        echo -e "${BOLD}${CYAN}║${NC}     ${GREEN}║${NC}  ${BOLD}VPC${NC} ${DIM}(${PROJECT_NAME}-vpc)${NC}                       ${GREEN}║${NC}"
+        # Calculate padding for VPC name (total width is 51 chars between ║ markers)
+        # Format: "  VPC (name)" + padding to reach 51 total chars
+        local vpc_label_len=$((8 + ${#vpc_display}))  # "  VPC (" + name + ")" = 2+3+1+1+len+1
+        local vpc_padding=$((51 - vpc_label_len))
+        local vpc_spaces=$(printf '%*s' "$vpc_padding" '')
+        echo -e "${BOLD}${CYAN}║${NC}     ${GREEN}║${NC}  ${BOLD}VPC${NC} ${DIM}(${vpc_display})${NC}${vpc_spaces}${GREEN}║${NC}"
         echo -e "${BOLD}${CYAN}║${NC}     ${GREEN}║${NC}                   ${GRAY}│${NC}                              ${GREEN}║${NC}"
         echo -e "${BOLD}${CYAN}║${NC}     ${GREEN}║${NC}            ${YELLOW}┌──────▼──────┐${NC}                       ${GREEN}║${NC}"
         echo -e "${BOLD}${CYAN}║${NC}     ${GREEN}║${NC}            ${YELLOW}│${NC} ${BOLD}Internet GW${NC} ${YELLOW}│${NC}                       ${GREEN}║${NC}"
@@ -546,6 +573,39 @@ main() {
 
     # Discover all resources
     discover_all_resources
+
+    # Check if any resources were found
+    if [ ${#RESOURCES[@]} -eq 0 ]; then
+        echo ""
+        echo -e "${YELLOW}⚠${NC}  ${BOLD}No resources found!${NC}"
+        echo ""
+
+        if [ "$FILTER_BY_PROJECT" = "true" ] && [ -n "$PROJECT_NAME" ]; then
+            echo -e "${DIM}The script expects resources to follow this naming pattern:${NC}"
+            echo ""
+            echo -e "  ${CYAN}▸${NC} VPC with Name tag:        ${GREEN}${PROJECT_NAME}-vpc${NC}"
+            echo -e "  ${CYAN}▸${NC} RDS instance:             ${GREEN}${PROJECT_NAME}-db${NC}"
+            echo -e "  ${CYAN}▸${NC} ElastiCache cluster:      ${GREEN}${PROJECT_NAME}-redis${NC}"
+            echo -e "  ${CYAN}▸${NC} Elastic Beanstalk app:    ${GREEN}${PROJECT_NAME}-app-${ENVIRONMENT}${NC}"
+            echo -e "  ${CYAN}▸${NC} S3 buckets:               ${GREEN}Contains '${PROJECT_NAME}'${NC}"
+            echo -e "  ${CYAN}▸${NC} Security Groups:          ${GREEN}Tag 'Project=${PROJECT_NAME}'${NC}"
+            echo ""
+            echo -e "${DIM}Suggestions:${NC}"
+            echo -e "  ${YELLOW}1.${NC} Verify resources exist in region: ${GREEN}${AWS_REGION}${NC}"
+            echo -e "  ${YELLOW}2.${NC} Check resource names/tags match the pattern above"
+            echo -e "  ${YELLOW}3.${NC} Try selecting ${GREEN}'Show ALL resources'${NC} to see everything"
+            echo -e "  ${YELLOW}4.${NC} Run ${GREEN}aws-vis-discover-resources.sh${NC} to see what's available"
+        else
+            echo -e "${DIM}No AWS resources found in region: ${GREEN}${AWS_REGION}${NC}"
+            echo ""
+            echo -e "${DIM}Suggestions:${NC}"
+            echo -e "  ${YELLOW}1.${NC} Verify you have resources in this region"
+            echo -e "  ${YELLOW}2.${NC} Check your AWS credentials are configured correctly"
+            echo -e "  ${YELLOW}3.${NC} Try a different region"
+        fi
+        echo ""
+        return 0
+    fi
 
     # Display visualizations
     print_architecture_diagram

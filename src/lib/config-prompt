@@ -46,6 +46,38 @@ discover_aws_projects() {
     echo "$all_projects"
 }
 
+# Function to discover existing environments for a project
+# Returns list of environments found in Elastic Beanstalk apps named {PROJECT}-app-{ENV}
+discover_project_environments() {
+    local project_name=$1
+    local region="${AWS_REGION}"
+
+    # Require parameters
+    if [ -z "$project_name" ] || [ -z "$region" ]; then
+        echo "Error: project_name and AWS_REGION must be set before discovering environments" >&2
+        return 1
+    fi
+
+    # Find all Elastic Beanstalk applications matching the project pattern
+    local app_names=$(aws elasticbeanstalk describe-applications \
+        --region "$region" \
+        --query "Applications[?starts_with(ApplicationName, '${project_name}-app-')].ApplicationName" \
+        --output text 2>/dev/null || echo "")
+
+    # Extract environment names from app names
+    local environments=""
+    for app_name in $app_names; do
+        # Extract environment from pattern: {project}-app-{environment}
+        local env_name="${app_name#${project_name}-app-}"
+        if [ -n "$env_name" ] && [ "$env_name" != "$app_name" ]; then
+            environments="${environments}${env_name}\n"
+        fi
+    done
+
+    # Return unique sorted list
+    echo -e "$environments" | grep -v '^$' | sort -u
+}
+
 # Function to prompt for AWS configuration
 # Usage: prompt_aws_config [allow_show_all] [script_type]
 #   allow_show_all: "true" to offer "show all resources" option (for visualization scripts)
@@ -135,7 +167,8 @@ prompt_aws_config() {
             elif [ "$PROJECT_CHOICE" = "Show ALL resources (no project filter)" ]; then
                 PROJECT_NAME=""
                 FILTER_BY_PROJECT="false"
-                ENVIRONMENT="${ENVIRONMENT:-staging}"
+                ENVIRONMENT=""  # Show all environments when showing all projects
+
                 export PROJECT_NAME
                 export ENVIRONMENT
                 export AWS_REGION
@@ -189,7 +222,8 @@ prompt_aws_config() {
                 else
                     PROJECT_NAME=""
                     FILTER_BY_PROJECT="false"
-                    ENVIRONMENT="${ENVIRONMENT:-staging}"
+                    ENVIRONMENT=""  # Show all environments when showing all projects
+
                     export PROJECT_NAME
                     export ENVIRONMENT
                     export AWS_REGION
@@ -202,7 +236,66 @@ prompt_aws_config() {
     fi
 
     # Now prompt for environment if not set
-    ENVIRONMENT="${ENVIRONMENT:-staging}"
+    if [ -z "$ENVIRONMENT" ]; then
+        echo ""
+        prompt_header "Environment Selection" "Select deployment environment"
+
+        # Discover available environments for this project
+        echo -e "${PROMPT_DIM}Discovering environments for ${PROJECT_NAME}...${PROMPT_RESET}"
+        local discovered_envs=$(discover_project_environments "$PROJECT_NAME")
+
+        # Count discovered environments
+        local env_count=0
+        if [ -n "$discovered_envs" ]; then
+            env_count=$(printf '%s\n' "$discovered_envs" | grep -c '^')
+        fi
+
+        echo ""
+
+        # Build options array based on what was discovered
+        local -a env_options=()
+        if [ "$env_count" -gt 0 ]; then
+            prompt_success "Found $env_count existing environment(s) for ${PROJECT_NAME}"
+            echo ""
+
+            # Add discovered environments
+            while IFS= read -r env; do
+                [ -n "$env" ] && env_options+=("$env")
+            done <<< "$discovered_envs"
+
+            # Add option to use custom environment
+            env_options+=("Custom environment...")
+        else
+            prompt_warning "No existing environments found for ${PROJECT_NAME}"
+            echo -e "${PROMPT_DIM}Using standard environment names${PROMPT_RESET}"
+            echo ""
+
+            # Fallback to standard environments
+            env_options=("development" "staging" "production" "Custom environment...")
+        fi
+
+        # Prompt user to select
+        if ! prompt_select ENVIRONMENT_CHOICE "Select environment" 0 "${env_options[@]}"; then
+            echo ""
+            prompt_error "Failed to read input. Exiting."
+            exit 1
+        fi
+
+        # Handle custom environment
+        if [ "$ENVIRONMENT_CHOICE" = "Custom environment..." ]; then
+            echo ""
+            if ! prompt_text ENVIRONMENT \
+                "Environment name (lowercase, no spaces)" \
+                "" \
+                "^[a-z0-9-]+$"; then
+                echo ""
+                prompt_error "Failed to read input. Exiting."
+                exit 1
+            fi
+        else
+            ENVIRONMENT="$ENVIRONMENT_CHOICE"
+        fi
+    fi
 
     echo ""
     echo -e "${PROMPT_BOLD}${PROMPT_CYAN}╔═══════════════════════════════════════════════════════════════╗${PROMPT_RESET}"
@@ -217,8 +310,18 @@ prompt_aws_config() {
     fi
 
     echo ""
-    echo -e "  ${PROMPT_DIM}Project Name:${PROMPT_RESET}  ${PROMPT_GREEN}${PROJECT_NAME}${PROMPT_RESET}"
-    echo -e "  ${PROMPT_DIM}Environment:${PROMPT_RESET}   ${PROMPT_GREEN}${ENVIRONMENT}${PROMPT_RESET}"
+    if [ -n "$PROJECT_NAME" ]; then
+        echo -e "  ${PROMPT_DIM}Project Name:${PROMPT_RESET}  ${PROMPT_GREEN}${PROJECT_NAME}${PROMPT_RESET}"
+    else
+        echo -e "  ${PROMPT_DIM}Project Name:${PROMPT_RESET}  ${PROMPT_YELLOW}All Projects${PROMPT_RESET}"
+    fi
+
+    if [ -n "$ENVIRONMENT" ]; then
+        echo -e "  ${PROMPT_DIM}Environment:${PROMPT_RESET}   ${PROMPT_GREEN}${ENVIRONMENT}${PROMPT_RESET}"
+    else
+        echo -e "  ${PROMPT_DIM}Environment:${PROMPT_RESET}   ${PROMPT_YELLOW}All Environments${PROMPT_RESET}"
+    fi
+
     echo -e "  ${PROMPT_DIM}AWS Region:${PROMPT_RESET}    ${PROMPT_GREEN}${AWS_REGION}${PROMPT_RESET}"
 
     # Show additional config if available
@@ -282,13 +385,75 @@ prompt_aws_config() {
                 exit 1
             fi
 
-            if ! prompt_select_or_custom ENVIRONMENT \
-                "Environment" \
-                "$ENVIRONMENT" \
-                "development" "staging" "production"; then
+            # Discover available environments for the (possibly newly entered) project
+            echo ""
+            echo -e "${PROMPT_DIM}Discovering environments for ${PROJECT_NAME}...${PROMPT_RESET}"
+            local discovered_envs=$(discover_project_environments "$PROJECT_NAME")
+
+            # Count discovered environments
+            local env_count=0
+            if [ -n "$discovered_envs" ]; then
+                env_count=$(printf '%s\n' "$discovered_envs" | grep -c '^')
+            fi
+
+            echo ""
+
+            # Build options array based on what was discovered
+            local -a env_options=()
+            if [ "$env_count" -gt 0 ]; then
+                prompt_success "Found $env_count existing environment(s) for ${PROJECT_NAME}"
                 echo ""
-                prompt_error "Failed to read input. Exiting."
-                exit 1
+
+                # Add discovered environments
+                while IFS= read -r env; do
+                    [ -n "$env" ] && env_options+=("$env")
+                done <<< "$discovered_envs"
+
+                # Add option to use custom environment
+                env_options+=("Custom environment...")
+
+                # Find default index if current ENVIRONMENT is in the list
+                local default_idx=0
+                local idx=0
+                for opt in "${env_options[@]}"; do
+                    if [ "$opt" = "$ENVIRONMENT" ]; then
+                        default_idx=$idx
+                        break
+                    fi
+                    ((idx++))
+                done
+
+                # Prompt user to select
+                if ! prompt_select ENVIRONMENT_CHOICE "Select environment" "$default_idx" "${env_options[@]}"; then
+                    echo ""
+                    prompt_error "Failed to read input. Exiting."
+                    exit 1
+                fi
+
+                # Handle custom environment
+                if [ "$ENVIRONMENT_CHOICE" = "Custom environment..." ]; then
+                    echo ""
+                    if ! prompt_text ENVIRONMENT \
+                        "Environment name (lowercase, no spaces)" \
+                        "$ENVIRONMENT" \
+                        "^[a-z0-9-]+$"; then
+                        echo ""
+                        prompt_error "Failed to read input. Exiting."
+                        exit 1
+                    fi
+                else
+                    ENVIRONMENT="$ENVIRONMENT_CHOICE"
+                fi
+            else
+                # Fallback to select-or-custom with standard options
+                if ! prompt_select_or_custom ENVIRONMENT \
+                    "Environment" \
+                    "$ENVIRONMENT" \
+                    "development" "staging" "production"; then
+                    echo ""
+                    prompt_error "Failed to read input. Exiting."
+                    exit 1
+                fi
             fi
 
             if ! prompt_select_or_custom AWS_REGION \
@@ -347,11 +512,11 @@ prompt_aws_config() {
         "Show ALL resources (ignore project filter)")
             echo ""
             prompt_warning "Scanning ALL resources in region ${AWS_REGION}"
-            prompt_info "This may take longer and show resources from all projects"
+            prompt_info "This will show resources from all projects and environments"
 
             export FILTER_BY_PROJECT="false"
             export PROJECT_NAME=""
-            export ENVIRONMENT=""
+            export ENVIRONMENT=""  # Show all environments when showing all projects
             ;;
     esac
 

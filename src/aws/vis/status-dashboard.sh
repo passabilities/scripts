@@ -83,6 +83,8 @@ print_status() {
 
 # Function to check VPC health
 check_vpc() {
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}VPC & Network${NC}"
     echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
 
@@ -161,11 +163,15 @@ check_vpc() {
             print_status "VPC" "No VPCs found" "" "unknown"
         fi
     fi
+
+    echo -e "${BOLD}${CYAN}║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # Function to check RDS health
 check_rds() {
-    echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}Database (RDS)${NC}"
     echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
 
@@ -277,11 +283,15 @@ check_rds() {
             print_status "RDS Instances" "None found" "" "unknown"
         fi
     fi
+
+    echo -e "${BOLD}${CYAN}║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # Function to check ElastiCache health
 check_elasticache() {
-    echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}Cache (ElastiCache)${NC}"
     echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
 
@@ -389,11 +399,15 @@ check_elasticache() {
             print_status "ElastiCache Clusters" "None found" "" "unknown"
         fi
     fi
+
+    echo -e "${BOLD}${CYAN}║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # Function to check S3 health
 check_s3() {
-    echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}Storage (S3)${NC}"
     echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
 
@@ -478,11 +492,15 @@ check_s3() {
     else
         print_status "S3 Buckets" "None found" "" "unknown"
     fi
+
+    echo -e "${BOLD}${CYAN}║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # Function to check SES health
 check_ses() {
-    echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}Email (SES)${NC}"
     echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
 
@@ -530,11 +548,15 @@ check_ses() {
     else
         print_status "SES Identities" "None found" "" "unknown"
     fi
+
+    echo -e "${BOLD}${CYAN}║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # Function to check Elastic Beanstalk health
 check_elasticbeanstalk() {
-    echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}Application (Elastic Beanstalk)${NC}"
     echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
 
@@ -631,13 +653,17 @@ check_elasticbeanstalk() {
             print_status "EB Applications" "None found" "" "unknown"
         fi
     fi
+
+    echo -e "${BOLD}${CYAN}║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # Function to print health summary
 print_health_summary() {
     local total=$((HEALTHY + WARNING + CRITICAL + UNKNOWN))
 
-    echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}Health Summary${NC}"
     echo -e "${BOLD}${CYAN}╟───────────────────────────────────────────────────────────────────────────╢${NC}"
     echo -e "${BOLD}${CYAN}║${NC}"
@@ -662,6 +688,8 @@ print_health_summary() {
     fi
 
     echo -e "${BOLD}${CYAN}║${NC}  ${BOLD}Overall Status: ${overall_color}${overall_status}${NC}"
+    echo -e "${BOLD}${CYAN}║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # Main execution
@@ -688,9 +716,6 @@ main() {
     echo -e "  ${CYAN}Region:${NC} ${GREEN}${AWS_REGION}${NC}"
     echo -e "  ${CYAN}Time:${NC} ${GREEN}$(date '+%Y-%m-%d %H:%M:%S %Z')${NC}"
 
-    echo ""
-    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
-
     # Check all resources
     check_vpc
     check_rds
@@ -699,9 +724,6 @@ main() {
     check_ses
     check_elasticbeanstalk
     print_health_summary
-
-    echo -e "${BOLD}${CYAN}║${NC}"
-    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 
     # Final status
     echo ""
