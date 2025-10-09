@@ -140,9 +140,54 @@ This ensures `bin/` always stays synchronized with `src/` in version control.
 
 ### Script Naming
 - Use lowercase with hyphens for multi-word names
-- Include `.sh` extension
+- **Executable scripts** (meant for users to run): Include `.sh` extension
+- **Library scripts** (sourced by other scripts, not meant for direct execution): NO `.sh` extension
+  - Example: `src/aws/lib/prompts` (library), `src/aws/configure.sh` (executable)
 - Be descriptive but concise
 - Remember: `src/category/action-name.sh` becomes `bin/category-action-name.sh`
+
+### Library Scripts Convention
+- Library files (scripts that are sourced, not executed) are placed in `src/lib/` (generic, shared across all scripts)
+- Library files should NOT have the `.sh` extension
+- Library files are sourced using the LIB_DIR pattern for portability:
+  ```bash
+  SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+  LIB_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")/src/lib"
+  source "${LIB_DIR}/prompts"
+  ```
+- Available libraries:
+  - `src/lib/prompts` - Interactive prompts library (npm-style UI)
+  - `src/lib/config-display` - Configuration display utilities
+
+### Running Scripts from Any Directory
+All scripts must be designed to run from any directory. Follow these patterns:
+
+**For finding the script's own directory:**
+```bash
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+```
+This gives you the absolute path to the directory containing the script.
+
+**For sourcing libraries:**
+```bash
+LIB_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")/src/lib"
+source "${LIB_DIR}/prompts"
+```
+
+**For relative file paths:**
+Always use absolute paths derived from `SCRIPT_DIR`, never use `$(pwd)` or relative paths.
+
+**Good examples:**
+```bash
+CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/config.env}"  # Relative to script
+PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"     # Navigate to root
+```
+
+**Bad examples:**
+```bash
+CONFIG_FILE="./config.env"          # Depends on current directory
+source ../lib/prompts               # Relative path, breaks if run from elsewhere
+```
 
 ### Shebang and Permissions
 - Always start scripts with `#!/bin/bash` (or appropriate shell)
@@ -186,3 +231,51 @@ find bin/ -type l -exec test ! -e {} \; -print
 ```
 
 This removes and recreates the entire `bin/` directory, ensuring clean state.
+
+## AWS Infrastructure Scripts
+
+The repository includes comprehensive AWS infrastructure automation scripts organized by function.
+
+### AWS Visualization Tools (`src/aws/vis/`)
+
+Dedicated visualization and monitoring tools for AWS infrastructure:
+
+**status-dashboard.sh** - Real-time infrastructure health monitoring
+- Live status monitoring for all AWS resources
+- Color-coded health indicators (healthy/warning/critical/unknown)
+- Supports VPCs, RDS, ElastiCache, S3, SES, Elastic Beanstalk
+- Project-based filtering or "show all" mode
+- Visual separation between resources for readability
+- Regional filtering for S3 buckets
+- Symlink: `bin/aws-vis-status-dashboard.sh`
+
+**discover-resources.sh** - Automated resource discovery
+- Scans all AWS resources in a region
+- Tag-based project filtering
+- JSON output for automation and integration
+- Symlink: `bin/aws-vis-discover-resources.sh`
+
+**visualize-infrastructure.sh** (infra.sh) - Infrastructure visualization
+- ASCII diagram generation of infrastructure
+- Dependency mapping between services
+- Export to multiple formats
+- Symlink: `bin/aws-vis-infra.sh`
+
+### Running Visualization Scripts
+
+```bash
+# Status dashboard with project filter
+./bin/aws-vis-status-dashboard.sh
+
+# Discover all resources
+./bin/aws-vis-discover-resources.sh
+
+# Visualize infrastructure
+./bin/aws-vis-infra.sh
+```
+
+All visualization scripts support:
+- Interactive configuration prompts
+- Project-based filtering
+- "Show all resources" mode (ignore project filters)
+- Configuration file loading from `aws-config.env`
