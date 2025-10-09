@@ -1,0 +1,454 @@
+#!/bin/bash
+
+# Interactive Prompts Library
+# Provides npm prompts-like interactive UI for bash scripts
+
+# Check if running in interactive terminal
+_is_interactive() {
+    [ -t 0 ] && [ -t 1 ]
+}
+
+# Ensure interactive terminal or fallback to simple prompts
+_require_interactive() {
+    if ! _is_interactive; then
+        echo "Error: This script requires an interactive terminal." >&2
+        echo "Please run it directly in a terminal, not via pipe or redirection." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Color codes
+export PROMPT_RESET='\033[0m'
+export PROMPT_BOLD='\033[1m'
+export PROMPT_DIM='\033[2m'
+export PROMPT_CYAN='\033[36m'
+export PROMPT_GREEN='\033[32m'
+export PROMPT_YELLOW='\033[33m'
+export PROMPT_RED='\033[31m'
+export PROMPT_BLUE='\033[34m'
+export PROMPT_MAGENTA='\033[35m'
+export PROMPT_GRAY='\033[90m'
+
+# Icons
+export PROMPT_ICON_QUESTION="?"
+export PROMPT_ICON_SUCCESS="✓"
+export PROMPT_ICON_ERROR="✗"
+export PROMPT_ICON_ARROW="›"
+export PROMPT_ICON_POINTER="❯"
+
+# Clear current line
+_prompt_clear_line() {
+    echo -ne "\033[2K\r"
+}
+
+# Move cursor up
+_prompt_cursor_up() {
+    local lines=${1:-1}
+    echo -ne "\033[${lines}A"
+}
+
+# Move cursor down
+_prompt_cursor_down() {
+    local lines=${1:-1}
+    echo -ne "\033[${lines}B"
+}
+
+# Hide cursor
+_prompt_hide_cursor() {
+    echo -ne "\033[?25l"
+}
+
+# Show cursor
+_prompt_show_cursor() {
+    echo -ne "\033[?25h"
+}
+
+# Save cursor position
+_prompt_save_cursor() {
+    echo -ne "\033[s"
+}
+
+# Restore cursor position
+_prompt_restore_cursor() {
+    echo -ne "\033[u"
+}
+
+# Function: prompt_text
+# Interactive text input with validation
+# Usage: prompt_text VAR_NAME "Question" "default_value" "validation_regex"
+prompt_text() {
+    # Check for interactive terminal
+    if ! _require_interactive; then
+        return 1
+    fi
+
+    local var_name=$1
+    local question=$2
+    local default_value=$3
+    local validation_regex=$4
+    local value=""
+
+    while true; do
+        # Show question
+        echo -ne "${PROMPT_CYAN}${PROMPT_ICON_QUESTION}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET}"
+
+        if [ -n "$default_value" ]; then
+            echo -ne " ${PROMPT_DIM}(${default_value})${PROMPT_RESET}"
+        fi
+
+        echo -ne "\n${PROMPT_CYAN}${PROMPT_ICON_POINTER}${PROMPT_RESET} "
+
+        # Read input with error handling
+        read -r value || {
+            echo -e "\n${PROMPT_RED}Error reading input${PROMPT_RESET}" >&2
+            return 1
+        }
+
+        # Use default if empty
+        if [ -z "$value" ]; then
+            value="$default_value"
+        fi
+
+        # Validate
+        if [ -n "$validation_regex" ]; then
+            if [[ ! "$value" =~ $validation_regex ]]; then
+                _prompt_cursor_up 2
+                _prompt_clear_line
+                _prompt_cursor_down 1
+                _prompt_clear_line
+                echo -ne "${PROMPT_RED}${PROMPT_ICON_ERROR}${PROMPT_RESET} Invalid format. Please try again.\n"
+                continue
+            fi
+        fi
+
+        # Success - show completed value
+        _prompt_cursor_up 2
+        _prompt_clear_line
+        echo -ne "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}${value}${PROMPT_RESET}\n"
+        _prompt_clear_line
+
+        eval "$var_name='$value'"
+        break
+    done
+}
+
+# Function: prompt_select
+# Interactive select menu with arrow key navigation
+# Usage: prompt_select VAR_NAME "Question" "default_index" "option1" "option2" ...
+prompt_select() {
+    # Check for interactive terminal
+    if ! _require_interactive; then
+        return 1
+    fi
+
+    local var_name=$1
+    local question=$2
+    local default_idx=$3
+    shift 3
+    local options=("$@")
+    local selected=${default_idx:-0}
+    local num_options=${#options[@]}
+
+    # Show question
+    echo -e "${PROMPT_CYAN}${PROMPT_ICON_QUESTION}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET}"
+
+    # Initial render
+    local i=0
+    for option in "${options[@]}"; do
+        if [ $i -eq $selected ]; then
+            echo -e "  ${PROMPT_CYAN}${PROMPT_ICON_POINTER}${PROMPT_RESET} ${PROMPT_CYAN}${option}${PROMPT_RESET}"
+        else
+            echo -e "    ${PROMPT_DIM}${option}${PROMPT_RESET}"
+        fi
+        ((i++))
+    done
+
+    _prompt_hide_cursor
+
+    # Navigation loop
+    while true; do
+        # Read single character (with error handling for set -e)
+        local key
+        IFS= read -rsn1 key || {
+            _prompt_show_cursor
+            echo -e "\n${PROMPT_RED}Error reading input${PROMPT_RESET}" >&2
+            return 1
+        }
+
+        # Handle arrow keys (they send 3 characters: ESC [ A/B)
+        if [[ $key == $'\033' ]]; then
+            read -rsn2 key || true
+            case "$key" in
+                '[A') # Up arrow
+                    ((selected--))
+                    if [ $selected -lt 0 ]; then
+                        selected=$((num_options - 1))
+                    fi
+                    ;;
+                '[B') # Down arrow
+                    ((selected++))
+                    if [ $selected -ge $num_options ]; then
+                        selected=0
+                    fi
+                    ;;
+            esac
+
+            # Re-render options
+            _prompt_cursor_up $num_options
+            i=0
+            for option in "${options[@]}"; do
+                _prompt_clear_line
+                if [ $i -eq $selected ]; then
+                    echo -e "  ${PROMPT_CYAN}${PROMPT_ICON_POINTER}${PROMPT_RESET} ${PROMPT_CYAN}${option}${PROMPT_RESET}"
+                else
+                    echo -e "    ${PROMPT_DIM}${option}${PROMPT_RESET}"
+                fi
+                ((i++))
+            done
+        elif [[ $key == "" ]]; then
+            # Enter key pressed
+            break
+        fi
+    done
+
+    _prompt_show_cursor
+
+    # Clear options and show selected value
+    _prompt_cursor_up $num_options
+    i=0
+    for option in "${options[@]}"; do
+        _prompt_clear_line
+        if [ $i -ne $num_options ]; then
+            echo ""
+        fi
+        ((i++))
+    done
+    _prompt_cursor_up $((num_options + 1))
+    _prompt_clear_line
+    echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}${options[$selected]}${PROMPT_RESET}"
+
+    eval "$var_name='${options[$selected]}'"
+}
+
+# Function: prompt_confirm
+# Interactive yes/no confirmation
+# Usage: prompt_confirm VAR_NAME "Question" "default_yes_or_no"
+prompt_confirm() {
+    # Check for interactive terminal
+    if ! _require_interactive; then
+        return 1
+    fi
+
+    local var_name=$1
+    local question=$2
+    local default=$3
+    local answer=""
+
+    while true; do
+        echo -ne "${PROMPT_CYAN}${PROMPT_ICON_QUESTION}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} "
+
+        if [ "$default" = "yes" ]; then
+            echo -ne "${PROMPT_DIM}(Y/n)${PROMPT_RESET} "
+        else
+            echo -ne "${PROMPT_DIM}(y/N)${PROMPT_RESET} "
+        fi
+
+        read -r answer || {
+            echo -e "\n${PROMPT_RED}Error reading input${PROMPT_RESET}" >&2
+            return 1
+        }
+
+        if [ -z "$answer" ]; then
+            answer="$default"
+        fi
+
+        case "$answer" in
+            [Yy]|[Yy][Ee][Ss]|yes)
+                _prompt_cursor_up 1
+                _prompt_clear_line
+                echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}yes${PROMPT_RESET}"
+                eval "$var_name='yes'"
+                break
+                ;;
+            [Nn]|[Nn][Oo]|no)
+                _prompt_cursor_up 1
+                _prompt_clear_line
+                echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}no${PROMPT_RESET}"
+                eval "$var_name='no'"
+                break
+                ;;
+            *)
+                _prompt_cursor_up 1
+                _prompt_clear_line
+                echo -e "${PROMPT_RED}${PROMPT_ICON_ERROR}${PROMPT_RESET} Please answer yes or no"
+                ;;
+        esac
+    done
+}
+
+# Function: prompt_select_or_custom
+# Select from options or enter custom value
+# Usage: prompt_select_or_custom VAR_NAME "Question" "default_value" "option1" "option2" ...
+prompt_select_or_custom() {
+    # Check for interactive terminal
+    if ! _require_interactive; then
+        return 1
+    fi
+
+    local var_name=$1
+    local question=$2
+    local default_value=$3
+    shift 3
+    local options=("$@" "Custom value...")
+    local num_options=${#options[@]}
+    local selected=0
+
+    # Find default index
+    local i=0
+    for option in "${options[@]}"; do
+        if [ "$option" = "$default_value" ]; then
+            selected=$i
+            break
+        fi
+        ((i++))
+    done
+
+    # Show question
+    echo -e "${PROMPT_CYAN}${PROMPT_ICON_QUESTION}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET}"
+
+    # Initial render
+    i=0
+    for option in "${options[@]}"; do
+        if [ $i -eq $selected ]; then
+            echo -e "  ${PROMPT_CYAN}${PROMPT_ICON_POINTER}${PROMPT_RESET} ${PROMPT_CYAN}${option}${PROMPT_RESET}"
+        else
+            echo -e "    ${PROMPT_DIM}${option}${PROMPT_RESET}"
+        fi
+        ((i++))
+    done
+
+    _prompt_hide_cursor
+
+    # Navigation loop
+    while true; do
+        local key
+        IFS= read -rsn1 key || {
+            _prompt_show_cursor
+            echo -e "\n${PROMPT_RED}Error reading input${PROMPT_RESET}" >&2
+            return 1
+        }
+
+        if [[ $key == $'\033' ]]; then
+            read -rsn2 key || true
+            case "$key" in
+                '[A') # Up arrow
+                    ((selected--))
+                    if [ $selected -lt 0 ]; then
+                        selected=$((num_options - 1))
+                    fi
+                    ;;
+                '[B') # Down arrow
+                    ((selected++))
+                    if [ $selected -ge $num_options ]; then
+                        selected=0
+                    fi
+                    ;;
+            esac
+
+            # Re-render
+            _prompt_cursor_up $num_options
+            i=0
+            for option in "${options[@]}"; do
+                _prompt_clear_line
+                if [ $i -eq $selected ]; then
+                    echo -e "  ${PROMPT_CYAN}${PROMPT_ICON_POINTER}${PROMPT_RESET} ${PROMPT_CYAN}${option}${PROMPT_RESET}"
+                else
+                    echo -e "    ${PROMPT_DIM}${option}${PROMPT_RESET}"
+                fi
+                ((i++))
+            done
+        elif [[ $key == "" ]]; then
+            break
+        fi
+    done
+
+    _prompt_show_cursor
+
+    local selected_value="${options[$selected]}"
+
+    # Clear options
+    _prompt_cursor_up $num_options
+    i=0
+    for option in "${options[@]}"; do
+        _prompt_clear_line
+        if [ $i -ne $num_options ]; then
+            echo ""
+        fi
+        ((i++))
+    done
+    _prompt_cursor_up $((num_options + 1))
+    _prompt_clear_line
+
+    # Handle custom value
+    if [ "$selected_value" = "Custom value..." ]; then
+        echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}Custom value${PROMPT_RESET}"
+        echo -ne "${PROMPT_CYAN}${PROMPT_ICON_POINTER}${PROMPT_RESET} Enter custom value: "
+        read -r custom_value || {
+            echo -e "\n${PROMPT_RED}Error reading input${PROMPT_RESET}" >&2
+            return 1
+        }
+        _prompt_cursor_up 2
+        _prompt_clear_line
+        _prompt_cursor_down 1
+        _prompt_clear_line
+        echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}${custom_value}${PROMPT_RESET}"
+        eval "$var_name='$custom_value'"
+    else
+        echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}${selected_value}${PROMPT_RESET}"
+        eval "$var_name='$selected_value'"
+    fi
+}
+
+# Function: prompt_header
+# Display a section header
+# Usage: prompt_header "Section Name" "Description"
+prompt_header() {
+    local title=$1
+    local description=$2
+
+    echo ""
+    echo -e "${PROMPT_BOLD}${PROMPT_CYAN}▸ ${title}${PROMPT_RESET}"
+    if [ -n "$description" ]; then
+        echo -e "  ${PROMPT_DIM}${description}${PROMPT_RESET}"
+    fi
+    echo ""
+}
+
+# Function: prompt_info
+# Display info message
+# Usage: prompt_info "Message"
+prompt_info() {
+    echo -e "${PROMPT_BLUE}ℹ${PROMPT_RESET} $1"
+}
+
+# Function: prompt_success
+# Display success message
+# Usage: prompt_success "Message"
+prompt_success() {
+    echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} $1"
+}
+
+# Function: prompt_warning
+# Display warning message
+# Usage: prompt_warning "Message"
+prompt_warning() {
+    echo -e "${PROMPT_YELLOW}⚠${PROMPT_RESET} $1"
+}
+
+# Function: prompt_error
+# Display error message
+# Usage: prompt_error "Message"
+prompt_error() {
+    echo -e "${PROMPT_RED}${PROMPT_ICON_ERROR}${PROMPT_RESET} $1"
+}

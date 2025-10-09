@@ -1,0 +1,241 @@
+#!/bin/bash
+
+# Configuration Display Utility
+# Shows current configuration in an elegant panel while scripts run
+
+# Terminal manipulation
+_config_display_get_terminal_width() {
+    tput cols 2>/dev/null || echo 80
+}
+
+_config_display_get_terminal_height() {
+    tput lines 2>/dev/null || echo 24
+}
+
+# Color codes
+export CONFIG_DISPLAY_RESET='\033[0m'
+export CONFIG_DISPLAY_BOLD='\033[1m'
+export CONFIG_DISPLAY_DIM='\033[2m'
+export CONFIG_DISPLAY_CYAN='\033[36m'
+export CONFIG_DISPLAY_GREEN='\033[32m'
+export CONFIG_DISPLAY_YELLOW='\033[33m'
+export CONFIG_DISPLAY_BLUE='\033[34m'
+export CONFIG_DISPLAY_GRAY='\033[90m'
+export CONFIG_DISPLAY_BG_BLUE='\033[44m'
+export CONFIG_DISPLAY_BG_GRAY='\033[100m'
+
+# Box drawing characters
+export BOX_TL="┌"
+export BOX_TR="┐"
+export BOX_BL="└"
+export BOX_BR="┘"
+export BOX_H="─"
+export BOX_V="│"
+export BOX_VR="├"
+export BOX_VL="┤"
+
+# Function to display configuration header panel
+config_display_header() {
+    local term_width=$(_config_display_get_terminal_width)
+    local panel_width=$((term_width > 80 ? 80 : term_width))
+    local content_width=$((panel_width - 4))
+
+    # Clear screen and move to top
+    clear
+
+    # Draw top border
+    echo -ne "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}"
+    echo -n "$BOX_TL"
+    printf '%*s' $((panel_width - 2)) '' | tr ' ' "$BOX_H"
+    echo -n "$BOX_TR"
+    echo -e "${CONFIG_DISPLAY_RESET}"
+
+    # Title
+    local title=" Configuration "
+    local title_padding=$(( (panel_width - ${#title}) / 2 ))
+    echo -ne "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}$BOX_V${CONFIG_DISPLAY_RESET}"
+    printf "%*s" $title_padding ""
+    echo -ne "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}${title}${CONFIG_DISPLAY_RESET}"
+    printf "%*s" $((panel_width - title_padding - ${#title} - 2)) ""
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}$BOX_V${CONFIG_DISPLAY_RESET}"
+
+    # Separator
+    echo -ne "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}"
+    echo -n "$BOX_VR"
+    printf '%*s' $((panel_width - 2)) '' | tr ' ' "$BOX_H"
+    echo -n "$BOX_VL"
+    echo -e "${CONFIG_DISPLAY_RESET}"
+
+    # Configuration values
+    _config_display_row "Project" "${PROJECT_NAME:-myproject}" "$panel_width"
+    _config_display_row "Environment" "${ENVIRONMENT:-staging}" "$panel_width"
+    _config_display_row "Region" "${AWS_REGION:-us-east-1}" "$panel_width"
+
+    if [ -n "$DB_NAME" ] || [ -n "$DB_USER" ]; then
+        _config_display_row "Database" "${DB_NAME:-N/A} (${DB_USER:-N/A})" "$panel_width"
+    fi
+
+    if [ -n "$EMAIL_DOMAIN" ]; then
+        _config_display_row "Email Domain" "${EMAIL_DOMAIN}" "$panel_width"
+    fi
+
+    if [ -n "$EB_INSTANCE_TYPE" ]; then
+        _config_display_row "EB Instance" "${EB_INSTANCE_TYPE}" "$panel_width"
+    fi
+
+    # Bottom border
+    echo -ne "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}"
+    echo -n "$BOX_BL"
+    printf '%*s' $((panel_width - 2)) '' | tr ' ' "$BOX_H"
+    echo -n "$BOX_BR"
+    echo -e "${CONFIG_DISPLAY_RESET}"
+
+    echo ""
+}
+
+# Function to display a configuration row
+_config_display_row() {
+    local label=$1
+    local value=$2
+    local panel_width=$3
+
+    local label_width=18
+    local value_start=$((label_width + 3))
+    local value_width=$((panel_width - value_start - 3))
+
+    echo -ne "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}$BOX_V${CONFIG_DISPLAY_RESET} "
+    echo -ne "${CONFIG_DISPLAY_DIM}${label}:${CONFIG_DISPLAY_RESET}"
+    printf "%*s" $((label_width - ${#label})) ""
+    echo -ne "${CONFIG_DISPLAY_GREEN}${value:0:$value_width}${CONFIG_DISPLAY_RESET}"
+    local remaining=$((panel_width - value_start - ${#value} - 2))
+    if [ $remaining -gt 0 ]; then
+        printf "%*s" $remaining ""
+    fi
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}$BOX_V${CONFIG_DISPLAY_RESET}"
+}
+
+# Function to display compact configuration sidebar
+config_display_compact() {
+    local term_width=$(_config_display_get_terminal_width)
+
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET}    ${CONFIG_DISPLAY_BOLD}Current Configuration${CONFIG_DISPLAY_RESET}       ${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_DIM}Project:${CONFIG_DISPLAY_RESET}     ${CONFIG_DISPLAY_GREEN}${PROJECT_NAME:-myproject}${CONFIG_DISPLAY_RESET}$(printf '%*s' $((27 - ${#PROJECT_NAME})) '') ${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_DIM}Environment:${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_GREEN}${ENVIRONMENT:-staging}${CONFIG_DISPLAY_RESET}$(printf '%*s' $((21 - ${#ENVIRONMENT})) '') ${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_DIM}Region:${CONFIG_DISPLAY_RESET}      ${CONFIG_DISPLAY_GREEN}${AWS_REGION:-us-east-1}${CONFIG_DISPLAY_RESET}$(printf '%*s' $((25 - ${#AWS_REGION})) '') ${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┃${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_CYAN}${CONFIG_DISPLAY_BOLD}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${CONFIG_DISPLAY_RESET}"
+    echo ""
+}
+
+# Function to display inline configuration
+config_display_inline() {
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}Configuration:${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_GREEN}${PROJECT_NAME}${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_DIM}│${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_GREEN}${ENVIRONMENT}${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_DIM}│${CONFIG_DISPLAY_RESET} ${CONFIG_DISPLAY_GREEN}${AWS_REGION}${CONFIG_DISPLAY_RESET}"
+    echo ""
+}
+
+# Function to save cursor position and display persistent header
+config_display_persistent_start() {
+    # Save original screen
+    tput smcup 2>/dev/null || true
+
+    # Display header
+    config_display_header
+
+    # Save cursor position after header
+    tput sc 2>/dev/null || echo -ne "\033[s"
+}
+
+# Function to restore screen
+config_display_persistent_end() {
+    # Restore original screen
+    tput rmcup 2>/dev/null || true
+}
+
+# Function to display configuration summary at script start
+config_display_summary() {
+    local script_name=$1
+
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}                                                                           ${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}"
+
+    local title="  ${script_name}  "
+    local padding=$(( (75 - ${#title}) / 2 ))
+    echo -ne "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}"
+    printf "%*s" $padding ""
+    echo -ne "${CONFIG_DISPLAY_BOLD}${title}${CONFIG_DISPLAY_RESET}"
+    printf "%*s" $((75 - padding - ${#title})) ""
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}"
+
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}                                                                           ${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}"
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}╠═══════════════════════════════════════════════════════════════════════════╣${CONFIG_DISPLAY_RESET}"
+
+    _config_summary_row "Project Name" "${PROJECT_NAME:-myproject}"
+    _config_summary_row "Display Name" "${PROJECT_DISPLAY_NAME:-My Application}"
+    _config_summary_row "Environment" "${ENVIRONMENT:-staging}"
+    _config_summary_row "AWS Region" "${AWS_REGION:-us-east-1}"
+
+    if [ -n "$DB_NAME" ]; then
+        echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}╟───────────────────────────────────────────────────────────────────────────╢${CONFIG_DISPLAY_RESET}"
+        _config_summary_row "Database Name" "${DB_NAME}"
+        _config_summary_row "Database User" "${DB_USER:-dbadmin}"
+        [ -n "$DB_INSTANCE_CLASS" ] && _config_summary_row "DB Instance" "${DB_INSTANCE_CLASS}"
+    fi
+
+    if [ -n "$EMAIL_DOMAIN" ]; then
+        echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}╟───────────────────────────────────────────────────────────────────────────╢${CONFIG_DISPLAY_RESET}"
+        _config_summary_row "Email Domain" "${EMAIL_DOMAIN}"
+        _config_summary_row "From Email" "${FROM_EMAIL:-noreply@${EMAIL_DOMAIN}}"
+    fi
+
+    if [ -n "$EB_INSTANCE_TYPE" ]; then
+        echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}╟───────────────────────────────────────────────────────────────────────────╢${CONFIG_DISPLAY_RESET}"
+        _config_summary_row "EB Instance Type" "${EB_INSTANCE_TYPE}"
+        _config_summary_row "EB Min Instances" "${EB_MIN_INSTANCES:-1}"
+        _config_summary_row "EB Max Instances" "${EB_MAX_INSTANCES:-4}"
+    fi
+
+    if [ -n "$VPC_CIDR" ]; then
+        echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}╟───────────────────────────────────────────────────────────────────────────╢${CONFIG_DISPLAY_RESET}"
+        _config_summary_row "VPC CIDR" "${VPC_CIDR}"
+    fi
+
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${CONFIG_DISPLAY_RESET}"
+    echo ""
+}
+
+# Helper function for summary rows
+_config_summary_row() {
+    local label=$1
+    local value=$2
+    local label_width=25
+    local value_width=48
+
+    echo -ne "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}  "
+    echo -ne "${CONFIG_DISPLAY_DIM}${label}:${CONFIG_DISPLAY_RESET}"
+    printf "%*s" $((label_width - ${#label})) ""
+    echo -ne "${CONFIG_DISPLAY_GREEN}${value:0:$value_width}${CONFIG_DISPLAY_RESET}"
+    printf "%*s" $((value_width - ${#value} + 2)) ""
+    echo -e "${CONFIG_DISPLAY_BOLD}${CONFIG_DISPLAY_CYAN}║${CONFIG_DISPLAY_RESET}"
+}
+
+# Function to show a minimal status bar
+config_display_statusbar() {
+    local term_width=$(_config_display_get_terminal_width)
+
+    # Build status items
+    local project="${PROJECT_NAME:-myproject}"
+    local env="${ENVIRONMENT:-staging}"
+    local region="${AWS_REGION:-us-east-1}"
+
+    # Create status bar content
+    local status=" ${project} │ ${env} │ ${region} "
+    local status_length=${#status}
+    local padding=$((term_width - status_length - 2))
+
+    # Display status bar
+    echo -ne "${CONFIG_DISPLAY_BG_BLUE}${CONFIG_DISPLAY_BOLD}"
+    echo -n "${status}"
+    printf "%*s" $padding ""
+    echo -e "${CONFIG_DISPLAY_RESET}"
+}

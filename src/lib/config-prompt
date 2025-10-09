@@ -1,0 +1,466 @@
+#!/bin/bash
+
+# Configuration Prompt Library
+# Interactive prompts for confirming or changing configuration before script execution
+
+# Function to load existing configuration
+load_existing_config() {
+    CONFIG_FILE="${CONFIG_FILE:-$(pwd)/aws-config.env}"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE" 2>/dev/null || true
+        return 0
+    fi
+
+    return 1
+}
+
+# Function to discover existing projects from AWS
+discover_aws_projects() {
+    local region="${AWS_REGION}"
+
+    # Require AWS_REGION to be set
+    if [ -z "$region" ]; then
+        echo "Error: AWS_REGION must be set before discovering projects" >&2
+        return 1
+    fi
+
+    # Array to store unique project names
+    declare -a projects=()
+
+    # Scan VPCs for Project tags
+    local vpc_projects=$(aws ec2 describe-vpcs --region "$region" --output json 2>/dev/null | \
+        jq -r '.Vpcs[]?.Tags[]? | select(.Key == "Project") | .Value' 2>/dev/null | sort -u)
+
+    # Scan RDS for Project tags
+    local rds_projects=$(aws rds describe-db-instances --region "$region" --output json 2>/dev/null | \
+        jq -r '.DBInstances[]?.TagList[]? | select(.Key == "Project") | .Value' 2>/dev/null | sort -u)
+
+    # Scan Security Groups for Project tags
+    local sg_projects=$(aws ec2 describe-security-groups --region "$region" --output json 2>/dev/null | \
+        jq -r '.SecurityGroups[]?.Tags[]? | select(.Key == "Project") | .Value' 2>/dev/null | sort -u)
+
+    # Combine and deduplicate
+    local all_projects=$(echo -e "${vpc_projects}\n${rds_projects}\n${sg_projects}" | grep -v '^$' | sort -u)
+
+    echo "$all_projects"
+}
+
+# Function to prompt for AWS configuration
+# Usage: prompt_aws_config [allow_show_all] [script_type]
+#   allow_show_all: "true" to offer "show all resources" option (for visualization scripts)
+#   script_type: "setup" or "visualization" (affects messaging)
+prompt_aws_config() {
+    local allow_show_all=${1:-false}
+    local script_type=${2:-setup}
+
+    # Load current config if exists
+    local config_loaded=false
+    if load_existing_config; then
+        config_loaded=true
+    fi
+
+    # Check if AWS_REGION is set, if not prompt for it
+    if [ -z "$AWS_REGION" ]; then
+        echo ""
+        prompt_header "AWS Region Selection" "Select your AWS region"
+        if ! prompt_select_or_custom AWS_REGION \
+            "AWS Region" \
+            "us-east-1" \
+            "us-east-1" "us-east-2" "us-west-1" "us-west-2" \
+            "eu-west-1" "eu-central-1" "ap-southeast-1" "ap-northeast-1"; then
+            echo ""
+            prompt_error "Failed to read input. Exiting."
+            exit 1
+        fi
+    fi
+
+    # Check if PROJECT_NAME is set
+    local project_configured=false
+    if [ -n "$PROJECT_NAME" ]; then
+        project_configured=true
+    fi
+
+    # If no project configured, we need to help user select one
+    if [ "$project_configured" = false ]; then
+        echo ""
+        prompt_header "Project Selection Required" "No project configured"
+        echo ""
+        echo -e "${PROMPT_DIM}Discovering existing projects in ${AWS_REGION}...${PROMPT_RESET}"
+
+        local existing_projects=$(discover_aws_projects)
+
+        # Count discovered projects robustly
+        local project_count=0
+        if [ -n "$existing_projects" ]; then
+            project_count=$(printf '%s\n' "$existing_projects" | grep -c '^')
+        fi
+
+        echo ""
+
+        if [ "$project_count" -gt 0 ]; then
+            prompt_success "Found $project_count existing project(s)"
+            echo ""
+
+            # Build options array
+            local -a options=()
+            while IFS= read -r proj; do
+                [ -n "$proj" ] && options+=("$proj")
+            done <<< "$existing_projects"
+
+            options+=("Create new project")
+
+            if [ "$allow_show_all" = "true" ]; then
+                options+=("Show ALL resources (no project filter)")
+            fi
+
+            # Let user choose
+            if ! prompt_select PROJECT_CHOICE "Select a project" 0 "${options[@]}"; then
+                echo ""
+                prompt_error "Failed to read input. Exiting."
+                exit 1
+            fi
+
+            if [ "$PROJECT_CHOICE" = "Create new project" ]; then
+                echo ""
+                prompt_header "Create New Project" "Enter project details"
+                if ! prompt_text PROJECT_NAME \
+                    "Project name (lowercase, no spaces)" \
+                    "" \
+                    "^[a-z0-9-]+$"; then
+                    echo ""
+                    prompt_error "Failed to read input. Exiting."
+                    exit 1
+                fi
+            elif [ "$PROJECT_CHOICE" = "Show ALL resources (no project filter)" ]; then
+                PROJECT_NAME=""
+                FILTER_BY_PROJECT="false"
+                ENVIRONMENT="${ENVIRONMENT:-staging}"
+                export PROJECT_NAME
+                export ENVIRONMENT
+                export AWS_REGION
+                export FILTER_BY_PROJECT
+                echo ""
+                return 0
+            else
+                PROJECT_NAME="$PROJECT_CHOICE"
+            fi
+
+            project_configured=true
+        else
+            prompt_warning "No existing projects found in ${AWS_REGION}"
+            echo ""
+
+            if [ "$script_type" = "setup" ]; then
+                echo -e "${PROMPT_DIM}You need to create a new project.${PROMPT_RESET}"
+                echo ""
+                prompt_header "Create New Project" "Enter project details"
+                if ! prompt_text PROJECT_NAME \
+                    "Project name (lowercase, no spaces)" \
+                    "" \
+                    "^[a-z0-9-]+$"; then
+                    echo ""
+                    prompt_error "Failed to read input. Exiting."
+                    exit 1
+                fi
+                project_configured=true
+            elif [ "$allow_show_all" = "true" ]; then
+                # Visualization script with no projects - offer to show all
+                local -a options=("Create new project" "Show ALL resources (no project filter)")
+
+                if ! prompt_select PROJECT_CHOICE "What would you like to do?" 1 "${options[@]}"; then
+                    echo ""
+                    prompt_error "Failed to read input. Exiting."
+                    exit 1
+                fi
+
+                if [ "$PROJECT_CHOICE" = "Create new project" ]; then
+                    echo ""
+                    prompt_header "Create New Project" "Enter project details"
+                    if ! prompt_text PROJECT_NAME \
+                        "Project name (lowercase, no spaces)" \
+                        "" \
+                        "^[a-z0-9-]+$"; then
+                        echo ""
+                        prompt_error "Failed to read input. Exiting."
+                        exit 1
+                    fi
+                    project_configured=true
+                else
+                    PROJECT_NAME=""
+                    FILTER_BY_PROJECT="false"
+                    ENVIRONMENT="${ENVIRONMENT:-staging}"
+                    export PROJECT_NAME
+                    export ENVIRONMENT
+                    export AWS_REGION
+                    export FILTER_BY_PROJECT
+                    echo ""
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
+    # Now prompt for environment if not set
+    ENVIRONMENT="${ENVIRONMENT:-staging}"
+
+    echo ""
+    echo -e "${PROMPT_BOLD}${PROMPT_CYAN}╔═══════════════════════════════════════════════════════════════╗${PROMPT_RESET}"
+    echo -e "${PROMPT_BOLD}${PROMPT_CYAN}║${PROMPT_RESET}  ${PROMPT_BOLD}Current Configuration${PROMPT_RESET}                                    ${PROMPT_BOLD}${PROMPT_CYAN}║${PROMPT_RESET}"
+    echo -e "${PROMPT_BOLD}${PROMPT_CYAN}╚═══════════════════════════════════════════════════════════════╝${PROMPT_RESET}"
+    echo ""
+
+    if [ "$config_loaded" = true ]; then
+        echo -e "  ${PROMPT_DIM}Loaded from:${PROMPT_RESET} ${PROMPT_CYAN}${CONFIG_FILE}${PROMPT_RESET}"
+    else
+        echo -e "  ${PROMPT_YELLOW}⚠${PROMPT_RESET}  ${PROMPT_DIM}No config file found${PROMPT_RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${PROMPT_DIM}Project Name:${PROMPT_RESET}  ${PROMPT_GREEN}${PROJECT_NAME}${PROMPT_RESET}"
+    echo -e "  ${PROMPT_DIM}Environment:${PROMPT_RESET}   ${PROMPT_GREEN}${ENVIRONMENT}${PROMPT_RESET}"
+    echo -e "  ${PROMPT_DIM}AWS Region:${PROMPT_RESET}    ${PROMPT_GREEN}${AWS_REGION}${PROMPT_RESET}"
+
+    # Show additional config if available
+    if [ -n "$DB_NAME" ]; then
+        echo -e "  ${PROMPT_DIM}Database:${PROMPT_RESET}      ${PROMPT_GREEN}${DB_NAME}${PROMPT_RESET}"
+    fi
+    if [ -n "$EMAIL_DOMAIN" ]; then
+        echo -e "  ${PROMPT_DIM}Email Domain:${PROMPT_RESET}  ${PROMPT_GREEN}${EMAIL_DOMAIN}${PROMPT_RESET}"
+    fi
+
+    echo ""
+
+    # Build options based on script type
+    local options=()
+
+    if [ "$script_type" = "setup" ]; then
+        options+=("Continue with this configuration")
+        options+=("Modify configuration")
+
+        if [ "$config_loaded" = false ]; then
+            options+=("Run full configuration wizard")
+        fi
+    else
+        # Visualization scripts
+        options+=("Use this configuration")
+        options+=("Change configuration")
+
+        if [ "$allow_show_all" = "true" ]; then
+            options+=("Show ALL resources (ignore project filter)")
+        fi
+    fi
+
+    # Prompt user
+    local selected_idx=0
+    if ! prompt_select CONFIG_ACTION "How would you like to proceed?" "$selected_idx" "${options[@]}"; then
+        echo ""
+        prompt_error "Failed to read input. Exiting."
+        exit 1
+    fi
+
+    case "$CONFIG_ACTION" in
+        "Continue with this configuration"|"Use this configuration")
+            echo ""
+            prompt_success "Proceeding with current configuration"
+            export PROJECT_NAME
+            export ENVIRONMENT
+            export AWS_REGION
+            export FILTER_BY_PROJECT="true"
+            ;;
+
+        "Modify configuration"|"Change configuration")
+            echo ""
+            prompt_header "Update Configuration" "Modify specific values"
+
+            if ! prompt_text PROJECT_NAME \
+                "Project name (lowercase, no spaces)" \
+                "$PROJECT_NAME" \
+                "^[a-z0-9-]+$"; then
+                echo ""
+                prompt_error "Failed to read input. Exiting."
+                exit 1
+            fi
+
+            if ! prompt_select_or_custom ENVIRONMENT \
+                "Environment" \
+                "$ENVIRONMENT" \
+                "development" "staging" "production"; then
+                echo ""
+                prompt_error "Failed to read input. Exiting."
+                exit 1
+            fi
+
+            if ! prompt_select_or_custom AWS_REGION \
+                "AWS Region" \
+                "$AWS_REGION" \
+                "us-east-1" "us-east-2" "us-west-1" "us-west-2" \
+                "eu-west-1" "eu-central-1" "ap-southeast-1" "ap-northeast-1"; then
+                echo ""
+                prompt_error "Failed to read input. Exiting."
+                exit 1
+            fi
+
+            export PROJECT_NAME
+            export ENVIRONMENT
+            export AWS_REGION
+            export FILTER_BY_PROJECT="true"
+
+            echo ""
+            prompt_success "Configuration updated!"
+
+            # Ask if they want to save
+            if ! prompt_confirm SAVE_CONFIG "Save this configuration to ${CONFIG_FILE}?" "no"; then
+                echo ""
+                prompt_error "Failed to read input. Exiting."
+                exit 1
+            fi
+            if [ "$SAVE_CONFIG" = "yes" ]; then
+                save_minimal_config
+                prompt_success "Configuration saved!"
+            fi
+            ;;
+
+        "Run full configuration wizard")
+            echo ""
+            prompt_info "Launching full configuration wizard..."
+            echo ""
+
+            # Get script directory to find configure.sh
+            local script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+            local aws_dir="$(dirname "$(dirname "$script_dir")")/src/aws"
+
+            if [ -f "${aws_dir}/configure.sh" ]; then
+                bash "${aws_dir}/configure.sh"
+                # Reload config after wizard
+                load_existing_config
+                export PROJECT_NAME
+                export ENVIRONMENT
+                export AWS_REGION
+                export FILTER_BY_PROJECT="true"
+            else
+                prompt_error "Could not find configuration wizard"
+                exit 1
+            fi
+            ;;
+
+        "Show ALL resources (ignore project filter)")
+            echo ""
+            prompt_warning "Scanning ALL resources in region ${AWS_REGION}"
+            prompt_info "This may take longer and show resources from all projects"
+
+            export FILTER_BY_PROJECT="false"
+            export PROJECT_NAME=""
+            export ENVIRONMENT=""
+            ;;
+    esac
+
+    echo ""
+}
+
+# Function to save minimal configuration
+save_minimal_config() {
+    cat > "$CONFIG_FILE" << EOF
+# AWS Configuration
+# Generated on $(date)
+
+# Project Configuration
+export PROJECT_NAME="$PROJECT_NAME"
+export ENVIRONMENT="$ENVIRONMENT"
+export AWS_REGION="$AWS_REGION"
+
+# Run ./bin/aws-configure.sh for full configuration wizard
+EOF
+    chmod 600 "$CONFIG_FILE"
+}
+
+# Function to display final configuration summary
+display_config_summary() {
+    echo -e "${PROMPT_DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PROMPT_RESET}"
+    echo -e "${PROMPT_BOLD}Active Configuration:${PROMPT_RESET}"
+    echo ""
+
+    if [ "$FILTER_BY_PROJECT" = "true" ]; then
+        echo -e "  ${PROMPT_CYAN}▸${PROMPT_RESET} Project:     ${PROMPT_GREEN}${PROJECT_NAME}${PROMPT_RESET}"
+        echo -e "  ${PROMPT_CYAN}▸${PROMPT_RESET} Environment: ${PROMPT_GREEN}${ENVIRONMENT}${PROMPT_RESET}"
+        echo -e "  ${PROMPT_CYAN}▸${PROMPT_RESET} Region:      ${PROMPT_GREEN}${AWS_REGION}${PROMPT_RESET}"
+    else
+        echo -e "  ${PROMPT_YELLOW}▸${PROMPT_RESET} Mode:   ${PROMPT_GREEN}All Resources${PROMPT_RESET}"
+        echo -e "  ${PROMPT_CYAN}▸${PROMPT_RESET} Region: ${PROMPT_GREEN}${AWS_REGION}${PROMPT_RESET}"
+    fi
+
+    echo -e "${PROMPT_DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PROMPT_RESET}"
+    echo ""
+}
+
+# Function to check if filtering by project
+is_filtering_by_project() {
+    [ "$FILTER_BY_PROJECT" = "true" ]
+}
+
+# Function to get project filter for AWS CLI queries
+get_project_filter() {
+    if is_filtering_by_project && [ -n "$PROJECT_NAME" ]; then
+        echo "Name=tag:Project,Values=${PROJECT_NAME}"
+    else
+        echo ""
+    fi
+}
+
+# Function to get project name for queries (with wildcard if showing all)
+get_project_name() {
+    if is_filtering_by_project && [ -n "$PROJECT_NAME" ]; then
+        echo "${PROJECT_NAME}"
+    else
+        echo "*"
+    fi
+}
+
+# Function to confirm before destructive operations
+confirm_destructive_action() {
+    local action_description=$1
+    local resource_count=${2:-"multiple"}
+
+    echo ""
+    echo -e "${PROMPT_BOLD}${PROMPT_RED}╔═══════════════════════════════════════════════════════════════╗${PROMPT_RESET}"
+    echo -e "${PROMPT_BOLD}${PROMPT_RED}║${PROMPT_RESET}  ${PROMPT_BOLD}⚠  WARNING: Destructive Operation${PROMPT_RESET}                      ${PROMPT_BOLD}${PROMPT_RED}║${PROMPT_RESET}"
+    echo -e "${PROMPT_BOLD}${PROMPT_RED}╚═══════════════════════════════════════════════════════════════╝${PROMPT_RESET}"
+    echo ""
+    echo -e "${PROMPT_YELLOW}You are about to: ${PROMPT_BOLD}${action_description}${PROMPT_RESET}"
+    echo -e "${PROMPT_DIM}This will affect: ${PROMPT_BOLD}${resource_count}${PROMPT_RESET}${PROMPT_DIM} resource(s)${PROMPT_RESET}"
+    echo ""
+
+    if ! prompt_confirm PROCEED_DESTRUCTIVE "Are you absolutely sure you want to proceed?" "no"; then
+        echo ""
+        prompt_error "Failed to read input. Exiting."
+        exit 1
+    fi
+
+    if [ "$PROCEED_DESTRUCTIVE" != "yes" ]; then
+        echo ""
+        prompt_warning "Operation cancelled by user"
+        return 1
+    fi
+
+    # Double confirmation for critical operations
+    echo ""
+    prompt_warning "Final confirmation required"
+    if ! prompt_text CONFIRM_TEXT \
+        "Type 'DELETE' in all caps to confirm" \
+        "" \
+        "^DELETE$"; then
+        echo ""
+        prompt_error "Failed to read input. Exiting."
+        exit 1
+    fi
+
+    if [ "$CONFIRM_TEXT" != "DELETE" ]; then
+        echo ""
+        prompt_error "Confirmation failed - operation cancelled"
+        return 1
+    fi
+
+    echo ""
+    prompt_success "Confirmed - proceeding with operation"
+    return 0
+}
