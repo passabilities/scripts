@@ -13,7 +13,7 @@ while [ -h "$SOURCE" ]; do
   [[ $SOURCE != /* ]] && SOURCE="$SCRIPT_DIR/$SOURCE"
 done
 SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" &> /dev/null && pwd )"
-LIB_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")/src/lib"
+LIB_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"/src/lib
 
 # Source libraries
 source "${LIB_DIR}/prompts"
