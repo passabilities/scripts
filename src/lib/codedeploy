@@ -1,0 +1,1768 @@
+#!/bin/bash
+
+# CodeDeploy Library
+# Shared functions for AWS CodeDeploy automation scripts
+
+# Color codes for output
+export CD_RESET='\033[0m'
+export CD_BOLD='\033[1m'
+export CD_DIM='\033[2m'
+export CD_CYAN='\033[36m'
+export CD_GREEN='\033[32m'
+export CD_YELLOW='\033[33m'
+export CD_RED='\033[31m'
+export CD_BLUE='\033[34m'
+export CD_GRAY='\033[90m'
+
+# CodeDeploy configuration file name
+export CD_CONFIG_DIR=".codedeploy"
+export CD_CONFIG_FILE="config"
+
+# Function to find project root by searching for .codedeploy directory
+find_project_root() {
+    local current_dir="$(pwd)"
+
+    while [ "$current_dir" != "/" ]; do
+        if [ -d "$current_dir/$CD_CONFIG_DIR" ]; then
+            echo "$current_dir"
+            return 0
+        fi
+        current_dir="$(dirname "$current_dir")"
+    done
+
+    # Not found - return current directory
+    echo "$(pwd)"
+    return 1
+}
+
+# Function to load CodeDeploy configuration from project directory
+load_cd_config() {
+    local project_root=$(find_project_root)
+    local config_path="$project_root/$CD_CONFIG_DIR/$CD_CONFIG_FILE"
+
+    if [ -f "$config_path" ]; then
+        source "$config_path"
+        export CD_PROJECT_ROOT="$project_root"
+        return 0
+    fi
+
+    return 1
+}
+
+# Function to save CodeDeploy configuration
+# This saves project configuration that can be committed to version control
+save_cd_config() {
+    local project_root=${1:-$(pwd)}
+    local config_dir="$project_root/$CD_CONFIG_DIR"
+    local config_path="$config_dir/$CD_CONFIG_FILE"
+
+    # Create directory if it doesn't exist
+    mkdir -p "$config_dir" || {
+        echo "Error: Failed to create directory $config_dir" >&2
+        return 1
+    }
+
+    # Write config file
+    cat > "$config_path" << EOF
+# CodeDeploy Configuration
+# This file can be committed to version control
+# Generated on $(date)
+
+# Application Configuration
+export CD_APPLICATION_NAME="$CD_APPLICATION_NAME"
+export CD_DEPLOYMENT_GROUP="$CD_DEPLOYMENT_GROUP"
+export CD_COMPUTE_PLATFORM="$CD_COMPUTE_PLATFORM"
+
+# Deployment Configuration
+export CD_DEPLOYMENT_CONFIG="$CD_DEPLOYMENT_CONFIG"
+export CD_SERVICE_ROLE_NAME="$CD_SERVICE_ROLE_NAME"  # Role name, not ARN
+
+# AWS Configuration
+export AWS_REGION="$AWS_REGION"
+export PROJECT_NAME="$PROJECT_NAME"
+export ENVIRONMENT="$ENVIRONMENT"
+
+# Target Configuration
+export CD_TARGET_TYPE="$CD_TARGET_TYPE"  # tags, asg, instances
+export CD_TARGET_VALUE="$CD_TARGET_VALUE"  # JSON string or comma-separated values
+
+# Deployment Bundle Configuration
+export CD_BUNDLE_TYPE="${CD_BUNDLE_TYPE:-zip}"
+export CD_APPSPEC_LOCATION="${CD_APPSPEC_LOCATION:-appspec.yml}"
+export CD_EXCLUDE_PATTERNS="$CD_EXCLUDE_PATTERNS"
+
+# S3 Configuration for deployment bundles
+export CD_S3_BUCKET="$CD_S3_BUCKET"
+export CD_S3_KEY_PREFIX="${CD_S3_KEY_PREFIX:-codedeploy-bundles}"
+
+# Optional: Auto-rollback configuration
+export CD_AUTO_ROLLBACK_ENABLED="${CD_AUTO_ROLLBACK_ENABLED:-true}"
+export CD_AUTO_ROLLBACK_EVENTS="${CD_AUTO_ROLLBACK_EVENTS:-DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM}"
+
+# Instance Profile Configuration
+export CD_INSTANCE_PROFILE_NAME="$CD_INSTANCE_PROFILE_NAME"  # Profile name, not ARN
+EOF
+
+    # Verify config file was created
+    if [ ! -f "$config_path" ]; then
+        echo "Error: Failed to create config file at $config_path" >&2
+        return 1
+    fi
+
+    chmod 644 "$config_path" || {
+        echo "Error: Failed to set permissions on $config_path" >&2
+        return 1
+    }
+
+    # Create .gitignore if it doesn't exist in .codedeploy directory
+    local gitignore_path="$config_dir/.gitignore"
+    if [ ! -f "$gitignore_path" ]; then
+        cat > "$gitignore_path" << 'EOF'
+# Local-only configuration (if you need environment-specific overrides)
+config.local
+
+# Deployment artifacts
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+EOF
+    fi
+
+    echo "Config file created successfully at: $config_path" >&2
+    return 0
+}
+
+# Function to get service role ARN (looks up by name if needed)
+get_service_role_arn() {
+    local role_name=${1:-$CD_SERVICE_ROLE_NAME}
+
+    if [ -z "$role_name" ]; then
+        echo "" >&2
+        return 1
+    fi
+
+    # Check if it's already an ARN
+    if [[ "$role_name" == arn:aws:iam:* ]]; then
+        echo "$role_name"
+        return 0
+    fi
+
+    # Look up ARN by role name
+    get_iam_role_arn "$role_name"
+}
+
+# Function to get instance profile ARN (looks up by name if needed)
+get_instance_profile_arn() {
+    local profile_name=${1:-$CD_INSTANCE_PROFILE_NAME}
+
+    if [ -z "$profile_name" ]; then
+        echo "" >&2
+        return 1
+    fi
+
+    # Check if it's already an ARN
+    if [[ "$profile_name" == arn:aws:iam:* ]]; then
+        echo "$profile_name"
+        return 0
+    fi
+
+    # Look up ARN by profile name
+    get_iam_role_arn "$profile_name"
+}
+
+# Function to auto-detect project name
+# Tries multiple sources in order: project config files, git repo name, directory name
+detect_project_name() {
+    local project_dir=${1:-$(pwd)}
+    local detected_name=""
+
+    # Method 1: Check project-specific configuration files based on project type
+
+    # Node.js - package.json
+    if [ -z "$detected_name" ] && [ -f "$project_dir/package.json" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            detected_name=$(jq -r '.name // empty' "$project_dir/package.json" 2>/dev/null || echo "")
+        else
+            # Fallback: grep if jq not available
+            detected_name=$(grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$project_dir/package.json" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+        fi
+    fi
+
+    # Python - setup.py or pyproject.toml
+    if [ -z "$detected_name" ] && [ -f "$project_dir/setup.py" ]; then
+        detected_name=$(grep -oP 'name\s*=\s*["'\'']\K[^"'\'']+'  "$project_dir/setup.py" 2>/dev/null | head -1)
+    fi
+    if [ -z "$detected_name" ] && [ -f "$project_dir/pyproject.toml" ]; then
+        detected_name=$(grep -oP '^name\s*=\s*["'\'']\K[^"'\'']+'  "$project_dir/pyproject.toml" 2>/dev/null | head -1)
+    fi
+
+    # Rust - Cargo.toml
+    if [ -z "$detected_name" ] && [ -f "$project_dir/Cargo.toml" ]; then
+        detected_name=$(grep -oP '^name\s*=\s*["'\'']\K[^"'\'']+'  "$project_dir/Cargo.toml" 2>/dev/null | head -1)
+    fi
+
+    # Go - go.mod
+    if [ -z "$detected_name" ] && [ -f "$project_dir/go.mod" ]; then
+        detected_name=$(grep -E '^module[[:space:]]+' "$project_dir/go.mod" 2>/dev/null | head -1 | awk '{print $2}' | sed 's|.*/||')
+    fi
+
+    # Ruby - Gemfile or gemspec
+    if [ -z "$detected_name" ] && [ -f "$project_dir/Gemfile" ]; then
+        detected_name=$(grep -oP '^\s*gem\s+["'\'']\K[^"'\'']+'  "$project_dir/Gemfile" 2>/dev/null | head -1)
+    fi
+    if [ -z "$detected_name" ]; then
+        local gemspec=$(find "$project_dir" -maxdepth 1 -name "*.gemspec" 2>/dev/null | head -1)
+        if [ -n "$gemspec" ]; then
+            detected_name=$(basename "$gemspec" .gemspec)
+        fi
+    fi
+
+    # PHP - composer.json
+    if [ -z "$detected_name" ] && [ -f "$project_dir/composer.json" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            detected_name=$(jq -r '.name // empty' "$project_dir/composer.json" 2>/dev/null | sed 's|.*/||' || echo "")
+        else
+            detected_name=$(grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$project_dir/composer.json" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)".*/\1/' | sed 's|.*/||')
+        fi
+    fi
+
+    # Java - pom.xml or build.gradle
+    if [ -z "$detected_name" ] && [ -f "$project_dir/pom.xml" ]; then
+        detected_name=$(grep -o '<artifactId>[^<]*</artifactId>' "$project_dir/pom.xml" 2>/dev/null | head -1 | sed 's|</*artifactId>||g')
+    fi
+    if [ -z "$detected_name" ] && [ -f "$project_dir/build.gradle" ]; then
+        detected_name=$(grep -oP '^\s*name\s*=\s*["'\'']\K[^"'\'']+'  "$project_dir/build.gradle" 2>/dev/null | head -1)
+    fi
+
+    # Method 2: Try to get from git remote URL
+    if [ -z "$detected_name" ] && [ -d "$project_dir/.git" ]; then
+        local git_url=$(cd "$project_dir" && git config --get remote.origin.url 2>/dev/null || echo "")
+        if [ -n "$git_url" ]; then
+            # Extract repo name from URL (handles both https and ssh formats)
+            # Examples:
+            #   https://github.com/user/my-repo.git -> my-repo
+            #   git@github.com:user/my-repo.git -> my-repo
+            detected_name=$(echo "$git_url" | sed -E 's|^.*/([^/]+)\.git$|\1|' | sed -E 's|^.*/([^/]+)$|\1|')
+        fi
+    fi
+
+    # Method 3: Fallback to directory name
+    if [ -z "$detected_name" ]; then
+        detected_name=$(basename "$project_dir")
+    fi
+
+    # Sanitize the name: lowercase, replace underscores/spaces with hyphens, remove invalid chars
+    detected_name=$(echo "$detected_name" | tr '[:upper:]' '[:lower:]' | tr '_' '-' | tr ' ' '-' | sed 's/[^a-z0-9-]//g')
+
+    # Remove leading/trailing hyphens
+    detected_name=$(echo "$detected_name" | sed 's/^-//;s/-$//')
+
+    echo "$detected_name"
+}
+
+# Function to detect GitHub repository from git remote
+# Returns owner/repo format
+detect_github_repo() {
+    local project_dir=${1:-$(pwd)}
+
+    if [ ! -d "$project_dir/.git" ]; then
+        return 1
+    fi
+
+    # Get the git remote URL
+    local git_url=$(cd "$project_dir" && git config --get remote.origin.url 2>/dev/null || echo "")
+
+    if [ -z "$git_url" ]; then
+        return 1
+    fi
+
+    # Extract owner/repo from various GitHub URL formats
+    # SSH: git@github.com:owner/repo.git
+    # HTTPS: https://github.com/owner/repo.git
+    # HTTPS: https://github.com/owner/repo
+
+    local repo=""
+
+    if [[ $git_url =~ git@github\.com:(.+)\.git$ ]]; then
+        repo="${BASH_REMATCH[1]}"
+    elif [[ $git_url =~ github\.com[:/](.+)\.git$ ]]; then
+        repo="${BASH_REMATCH[1]}"
+    elif [[ $git_url =~ github\.com[:/](.+)$ ]]; then
+        repo="${BASH_REMATCH[1]}"
+    fi
+
+    echo "$repo"
+}
+
+# Function to detect project type from directory structure
+detect_project_type() {
+    local project_dir=${1:-$(pwd)}
+
+    # Check for various project indicators
+    if [ -f "$project_dir/package.json" ]; then
+        echo "nodejs"
+    elif [ -f "$project_dir/requirements.txt" ] || [ -f "$project_dir/setup.py" ]; then
+        echo "python"
+    elif [ -f "$project_dir/pom.xml" ] || [ -f "$project_dir/build.gradle" ]; then
+        echo "java"
+    elif [ -f "$project_dir/go.mod" ]; then
+        echo "go"
+    elif [ -f "$project_dir/Gemfile" ]; then
+        echo "ruby"
+    elif [ -f "$project_dir/composer.json" ]; then
+        echo "php"
+    elif [ -f "$project_dir/Cargo.toml" ]; then
+        echo "rust"
+    else
+        echo "unknown"
+    fi
+}
+
+# Function to get default build command based on project type
+get_default_build_command() {
+    local project_type=$1
+
+    case "$project_type" in
+        nodejs)
+            echo "npm ci && npm run build"
+            ;;
+        python)
+            echo "pip install -r requirements.txt"
+            ;;
+        java)
+            if [ -f "pom.xml" ]; then
+                echo "mvn clean package"
+            else
+                echo "gradle build"
+            fi
+            ;;
+        go)
+            echo "go build"
+            ;;
+        ruby)
+            echo "bundle install"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+# Function to check if CodeDeploy application exists
+cd_application_exists() {
+    local app_name=$1
+    local region=${2:-$AWS_REGION}
+
+    # Temporarily disable exit-on-error to handle "not found" gracefully
+    set +e
+    aws deploy get-application \
+        --application-name "$app_name" \
+        --region "$region" \
+        --output text &>/dev/null
+    local result=$?
+    set -e
+
+    return $result
+}
+
+# Function to check if deployment group exists
+cd_deployment_group_exists() {
+    local app_name=$1
+    local deployment_group=$2
+    local region=${3:-$AWS_REGION}
+
+    # Temporarily disable exit-on-error to handle "not found" gracefully
+    set +e
+    aws deploy get-deployment-group \
+        --application-name "$app_name" \
+        --deployment-group-name "$deployment_group" \
+        --region "$region" \
+        --output text &>/dev/null
+    local result=$?
+    set -e
+
+    return $result
+}
+
+# Function to get IAM role ARN by name
+get_iam_role_arn() {
+    local role_name=$1
+
+    aws iam get-role \
+        --role-name "$role_name" \
+        --query 'Role.Arn' \
+        --output text 2>/dev/null
+}
+
+# Function to create CodeDeploy service role
+create_codedeploy_service_role() {
+    local role_name=$1
+    local region=${2:-$AWS_REGION}
+    local project_name=${3:-}
+
+    # Create trust policy
+    local trust_policy=$(cat <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "codedeploy.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+)
+
+    # Check if role already exists
+    local existing_arn=$(get_iam_role_arn "$role_name" 2>/dev/null)
+    if [ -n "$existing_arn" ]; then
+        # Update trust policy to ensure it's correct
+        aws iam update-assume-role-policy \
+            --role-name "$role_name" \
+            --policy-document "$trust_policy" \
+            &>/dev/null
+        echo "$existing_arn"
+        return 0
+    fi
+
+    # Create role
+    if [ -n "$project_name" ]; then
+        aws iam create-role \
+            --role-name "$role_name" \
+            --assume-role-policy-document "$trust_policy" \
+            --description "Service role for AWS CodeDeploy" \
+            --tags Key=Project,Value="$project_name" \
+            --output text &>/dev/null
+    else
+        aws iam create-role \
+            --role-name "$role_name" \
+            --assume-role-policy-document "$trust_policy" \
+            --description "Service role for AWS CodeDeploy" \
+            --output text &>/dev/null
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create role" >&2
+        return 1
+    fi
+
+    # Attach AWS managed policy for CodeDeploy
+    aws iam attach-role-policy \
+        --role-name "$role_name" \
+        --policy-arn "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole" \
+        &>/dev/null
+
+    # Wait for IAM role propagation (trust policy needs time to propagate globally)
+    # AWS recommends waiting up to 10 seconds for IAM changes
+    echo "Waiting for IAM role to propagate..." >&2
+    sleep 10
+
+    # Return role ARN
+    get_iam_role_arn "$role_name"
+}
+
+# Function to create EC2 instance profile for CodeDeploy
+create_codedeploy_instance_profile() {
+    local profile_name=$1
+
+    # Check if role already exists
+    local existing_arn=$(get_iam_role_arn "$profile_name" 2>/dev/null)
+    if [ -n "$existing_arn" ]; then
+        echo "$existing_arn"
+        return 0
+    fi
+
+    # Create trust policy for EC2
+    local trust_policy=$(cat <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+)
+
+    # Create role
+    aws iam create-role \
+        --role-name "$profile_name" \
+        --assume-role-policy-document "$trust_policy" \
+        --description "Instance profile for CodeDeploy agent" \
+        --output text &>/dev/null
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create instance profile role" >&2
+        return 1
+    fi
+
+    # Attach policies
+    aws iam attach-role-policy \
+        --role-name "$profile_name" \
+        --policy-arn "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess" \
+        &>/dev/null
+
+    aws iam attach-role-policy \
+        --role-name "$profile_name" \
+        --policy-arn "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy" \
+        &>/dev/null
+
+    # Attach SSM policy for fetching runtime environment variables
+    aws iam attach-role-policy \
+        --role-name "$profile_name" \
+        --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" \
+        &>/dev/null
+
+    # Check if instance profile exists
+    set +e
+    aws iam get-instance-profile --instance-profile-name "$profile_name" &>/dev/null
+    local profile_exists=$?
+    set -e
+
+    if [ $profile_exists -ne 0 ]; then
+        # Create instance profile
+        aws iam create-instance-profile \
+            --instance-profile-name "$profile_name" \
+            &>/dev/null
+
+        if [ $? -ne 0 ]; then
+            echo "Failed to create instance profile" >&2
+            return 1
+        fi
+    fi
+
+    # Add role to instance profile (idempotent - safe to run if already added)
+    set +e
+    aws iam add-role-to-instance-profile \
+        --instance-profile-name "$profile_name" \
+        --role-name "$profile_name" \
+        &>/dev/null
+    set -e
+
+    # Wait for IAM propagation (instance profiles need time to propagate globally)
+    # AWS recommends waiting up to 10 seconds for IAM changes
+    echo "Waiting for instance profile to propagate..." >&2
+    sleep 10
+
+    # Return instance profile ARN (not role ARN)
+    aws iam get-instance-profile \
+        --instance-profile-name "$profile_name" \
+        --query 'InstanceProfile.Arn' \
+        --output text 2>/dev/null
+}
+
+# Function to get deployment status with color
+format_deployment_status() {
+    local status=$1
+
+    case "$status" in
+        Succeeded|Ready|Active)
+            echo -e "${CD_GREEN}${status}${CD_RESET}"
+            ;;
+        InProgress|Queued|Created)
+            echo -e "${CD_BLUE}${status}${CD_RESET}"
+            ;;
+        Failed|Stopped)
+            echo -e "${CD_RED}${status}${CD_RESET}"
+            ;;
+        *)
+            echo -e "${CD_GRAY}${status}${CD_RESET}"
+            ;;
+    esac
+}
+
+# Function to get health indicator
+get_health_indicator() {
+    local status=$1
+
+    case "$status" in
+        Succeeded|Ready|Active|Healthy)
+            echo -e "${CD_GREEN}●${CD_RESET}"
+            ;;
+        InProgress|Queued|Created|Pending)
+            echo -e "${CD_BLUE}●${CD_RESET}"
+            ;;
+        Failed|Stopped|Unhealthy)
+            echo -e "${CD_RED}●${CD_RESET}"
+            ;;
+        *)
+            echo -e "${CD_GRAY}○${CD_RESET}"
+            ;;
+    esac
+}
+
+# Function to list recent deployments
+list_recent_deployments() {
+    local app_name=$1
+    local deployment_group=$2
+    local region=${3:-$AWS_REGION}
+    local limit=${4:-10}
+
+    aws deploy list-deployments \
+        --application-name "$app_name" \
+        --deployment-group-name "$deployment_group" \
+        --region "$region" \
+        --max-items "$limit" \
+        --query 'deployments' \
+        --output text 2>/dev/null
+}
+
+# Function to get deployment details
+get_deployment_info() {
+    local deployment_id=$1
+    local region=${2:-$AWS_REGION}
+
+    aws deploy get-deployment \
+        --deployment-id "$deployment_id" \
+        --region "$region" \
+        --output json 2>/dev/null
+}
+
+# Function to wait for deployment to complete
+wait_for_deployment() {
+    local deployment_id=$1
+    local region=${2:-$AWS_REGION}
+    local timeout=${3:-900}  # 15 minutes default
+
+    echo "Waiting for deployment $deployment_id to complete..."
+
+    aws deploy wait deployment-successful \
+        --deployment-id "$deployment_id" \
+        --region "$region" \
+        --cli-read-timeout "$timeout" \
+        2>/dev/null
+
+    return $?
+}
+
+# Function to create deployment bundle
+create_deployment_bundle() {
+    local source_dir=$1
+    local output_file=$2
+    local exclude_patterns=${3:-""}
+
+    # Default excludes
+    local default_excludes=(
+        "*.git*"
+        "*node_modules*"
+        "*__pycache__*"
+        "*.pyc"
+        "*venv*"
+        "*env*"
+        "*.log"
+        "*logs*"
+        "*.DS_Store"
+        "*target*"
+        "*build*"
+        "*dist*"
+        "*.idea*"
+        "*.vscode*"
+        "*.test*"
+        "*.spec*"
+    )
+
+    # Build exclude arguments as array
+    local -a exclude_args_array=()
+    for pattern in "${default_excludes[@]}"; do
+        exclude_args_array+=(-x "$pattern")
+    done
+
+    # Add custom excludes
+    if [ -n "$exclude_patterns" ]; then
+        IFS=',' read -ra CUSTOM_EXCLUDES <<< "$exclude_patterns"
+        for pattern in "${CUSTOM_EXCLUDES[@]}"; do
+            [ -n "$pattern" ] && exclude_args_array+=(-x "$pattern")
+        done
+    fi
+
+    # Create zip bundle in subshell to preserve working directory
+    (
+        cd "$source_dir" || exit 1
+        zip -r "$output_file" . "${exclude_args_array[@]}" -q
+    )
+    local result=$?
+
+    return $result
+}
+
+# Function to upload bundle to S3
+upload_bundle_to_s3() {
+    local bundle_file=$1
+    local s3_bucket=$2
+    local s3_key=$3
+    local region=${4:-$AWS_REGION}
+
+    aws s3 cp "$bundle_file" "s3://$s3_bucket/$s3_key" \
+        --region "$region" \
+        --no-progress 2>&1
+
+    return $?
+}
+
+# Function to validate appspec.yml
+validate_appspec() {
+    local appspec_file=${1:-"appspec.yml"}
+
+    if [ ! -f "$appspec_file" ]; then
+        echo "Error: appspec.yml not found at $appspec_file" >&2
+        return 1
+    fi
+
+    # Basic validation - check for required fields
+    if ! grep -q "^version:" "$appspec_file"; then
+        echo "Error: appspec.yml missing 'version' field" >&2
+        return 1
+    fi
+
+    if ! grep -q "^os:" "$appspec_file" && ! grep -q "^Resources:" "$appspec_file"; then
+        echo "Error: appspec.yml missing 'os' or 'Resources' field" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+# Function to generate default appspec.yml
+generate_default_appspec() {
+    local project_type=$1
+    local output_file=${2:-"appspec.yml"}
+
+    case "$project_type" in
+        nodejs)
+            cat > "$output_file" << 'EOF'
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /app
+hooks:
+  BeforeInstall:
+    - location: scripts/before_install.sh
+      runas: root
+  AfterInstall:
+    - location: scripts/after_install.sh
+      runas: root
+  ApplicationStart:
+    - location: scripts/start_server.sh
+      runas: ubuntu
+  ApplicationStop:
+    - location: scripts/stop_server.sh
+      runas: ubuntu
+EOF
+            ;;
+        python)
+            cat > "$output_file" << 'EOF'
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /app
+hooks:
+  BeforeInstall:
+    - location: scripts/before_install.sh
+      runas: root
+  AfterInstall:
+    - location: scripts/after_install.sh
+      runas: root
+  ApplicationStart:
+    - location: scripts/start_server.sh
+      runas: ubuntu
+  ApplicationStop:
+    - location: scripts/stop_server.sh
+      runas: ubuntu
+EOF
+            ;;
+        *)
+            cat > "$output_file" << 'EOF'
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /app
+hooks:
+  BeforeInstall:
+    - location: scripts/before_install.sh
+      runas: root
+  AfterInstall:
+    - location: scripts/after_install.sh
+      runas: root
+  ApplicationStart:
+    - location: scripts/start_server.sh
+      runas: ubuntu
+  ApplicationStop:
+    - location: scripts/stop_server.sh
+      runas: ubuntu
+EOF
+            ;;
+    esac
+
+    return 0
+}
+
+# Function to generate lifecycle hook scripts
+# Creates scripts directory and default lifecycle scripts for the project type
+generate_lifecycle_scripts() {
+    local project_type=$1
+    local project_root=${2:-.}
+    local project_name=${3:-}
+    local region=${4:-us-east-2}
+    local scripts_dir="${project_root}/scripts"
+
+    # Create scripts directory
+    if [ ! -d "$scripts_dir" ]; then
+        mkdir -p "$scripts_dir"
+    fi
+
+    case "$project_type" in
+        nodejs)
+            # before_install.sh - Prepare the system
+            cat > "${scripts_dir}/before_install.sh" << 'EOF'
+#!/bin/bash
+# BeforeInstall: Clean up previous deployment and prepare system
+
+set -e
+
+APP_DIR="/app"
+CODEDEPLOY_ROOT="/opt/codedeploy-agent/deployment-root"
+DEPLOYMENT_GROUP_ID="${DEPLOYMENT_GROUP_ID:-}"
+MAX_DEPLOYMENTS_TO_KEEP=3
+
+echo "Starting cleanup process..."
+
+# Clean up old CodeDeploy deployment archives to free disk space
+if [ -d "$CODEDEPLOY_ROOT" ] && [ -n "$DEPLOYMENT_GROUP_ID" ]; then
+    echo "Cleaning up old deployment archives..."
+    DEPLOYMENT_GROUP_DIR="$CODEDEPLOY_ROOT/$DEPLOYMENT_GROUP_ID"
+
+    if [ -d "$DEPLOYMENT_GROUP_DIR" ]; then
+        # Get list of deployment directories sorted by modification time (oldest first)
+        # Keep only the most recent N deployments
+        DEPLOYMENT_DIRS=$(find "$DEPLOYMENT_GROUP_DIR" -maxdepth 1 -type d -name "d-*" -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+        TOTAL_DEPLOYMENTS=$(echo "$DEPLOYMENT_DIRS" | grep -c "d-" || echo "0")
+
+        if [ "$TOTAL_DEPLOYMENTS" -gt "$MAX_DEPLOYMENTS_TO_KEEP" ]; then
+            DEPLOYMENTS_TO_DELETE=$((TOTAL_DEPLOYMENTS - MAX_DEPLOYMENTS_TO_KEEP))
+            echo "Found $TOTAL_DEPLOYMENTS deployments, removing oldest $DEPLOYMENTS_TO_DELETE..."
+
+            echo "$DEPLOYMENT_DIRS" | head -n "$DEPLOYMENTS_TO_DELETE" | while read -r dir; do
+                if [ -d "$dir" ]; then
+                    echo "  Removing old deployment: $(basename "$dir")"
+                    rm -rf "$dir"
+                fi
+            done
+
+            echo "✓ Cleaned up $DEPLOYMENTS_TO_DELETE old deployment(s)"
+        else
+            echo "Only $TOTAL_DEPLOYMENTS deployment(s) found, no cleanup needed"
+        fi
+    fi
+fi
+
+# Remove old application files if they exist
+if [ -d "$APP_DIR" ]; then
+    echo "Cleaning up previous application directory..."
+    rm -rf $APP_DIR
+fi
+
+# Create application directory
+mkdir -p $APP_DIR
+
+# Clean up old log files (older than 7 days)
+if [ -d "/var/log" ]; then
+    echo "Cleaning up old log files..."
+    find /var/log -type f -name "*.log.*" -mtime +7 -delete 2>/dev/null || true
+    find /var/log -type f -name "*.gz" -mtime +7 -delete 2>/dev/null || true
+fi
+
+echo "✓ System prepared for installation"
+EOF
+
+            # after_install.sh - Configure deployment (NO BUILD/INSTALL STEPS)
+            cat > "${scripts_dir}/after_install.sh" << 'EOF'
+#!/bin/bash
+# AfterInstall: Configure deployment
+# NOTE: Dependencies and build are handled by CodeBuild (buildspec.yml)
+#       This script should NOT install or build anything
+# NOTE: .env file is created during build and included in the artifact
+
+set -e
+
+APP_DIR="/app"
+
+echo "Configuring deployment..."
+
+# Set proper permissions
+chown -R ubuntu:ubuntu "$APP_DIR"
+chmod +x "$APP_DIR/scripts"/*.sh 2>/dev/null || true
+
+# Set permissions on .env file (created during build)
+if [ -f "$APP_DIR/.env" ]; then
+    chmod 600 "$APP_DIR/.env"
+    echo "✓ Found .env file from build artifact"
+else
+    echo "Warning: .env file not found in artifact"
+fi
+
+echo "Deployment configured successfully"
+echo "NOTE: If using CodeBuild, dependencies are already installed in the artifact"
+EOF
+
+            # start_server.sh - Start the application
+            cat > "${scripts_dir}/start_server.sh" << 'EOF'
+#!/bin/bash
+# ApplicationStart: Start the Node.js application
+
+set -e
+
+# Load NVM
+. "/home/ubuntu/.nvm/nvm.sh"
+
+APP_DIR="/app"
+
+# Start application with PM2
+cd "$APP_DIR"
+pm2 start ecosystem.config.js || pm2 start npm --name "app" -- start
+pm2 save
+
+echo "Application started successfully"
+EOF
+
+            # stop_server.sh - Stop the application
+            cat > "${scripts_dir}/stop_server.sh" << 'EOF'
+#!/bin/bash
+# ApplicationStop: Stop the Node.js application
+
+# Load NVM
+. "/home/ubuntu/.nvm/nvm.sh"
+
+# Stop PM2 processes (suppress errors if no processes running)
+pm2 list | grep -q "online\|stopped\|errored" && pm2 delete all 2>/dev/null || true
+
+echo "Application stopped successfully"
+EOF
+            ;;
+
+        python)
+            # before_install.sh
+            cat > "${scripts_dir}/before_install.sh" << 'EOF'
+#!/bin/bash
+# BeforeInstall: Clean up previous deployment and prepare system
+
+set -e
+
+APP_DIR="/app"
+CODEDEPLOY_ROOT="/opt/codedeploy-agent/deployment-root"
+DEPLOYMENT_GROUP_ID="${DEPLOYMENT_GROUP_ID:-}"
+MAX_DEPLOYMENTS_TO_KEEP=3
+
+echo "Starting cleanup process..."
+
+# Clean up old CodeDeploy deployment archives to free disk space
+if [ -d "$CODEDEPLOY_ROOT" ] && [ -n "$DEPLOYMENT_GROUP_ID" ]; then
+    echo "Cleaning up old deployment archives..."
+    DEPLOYMENT_GROUP_DIR="$CODEDEPLOY_ROOT/$DEPLOYMENT_GROUP_ID"
+
+    if [ -d "$DEPLOYMENT_GROUP_DIR" ]; then
+        # Get list of deployment directories sorted by modification time (oldest first)
+        # Keep only the most recent N deployments
+        DEPLOYMENT_DIRS=$(find "$DEPLOYMENT_GROUP_DIR" -maxdepth 1 -type d -name "d-*" -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+        TOTAL_DEPLOYMENTS=$(echo "$DEPLOYMENT_DIRS" | grep -c "d-" || echo "0")
+
+        if [ "$TOTAL_DEPLOYMENTS" -gt "$MAX_DEPLOYMENTS_TO_KEEP" ]; then
+            DEPLOYMENTS_TO_DELETE=$((TOTAL_DEPLOYMENTS - MAX_DEPLOYMENTS_TO_KEEP))
+            echo "Found $TOTAL_DEPLOYMENTS deployments, removing oldest $DEPLOYMENTS_TO_DELETE..."
+
+            echo "$DEPLOYMENT_DIRS" | head -n "$DEPLOYMENTS_TO_DELETE" | while read -r dir; do
+                if [ -d "$dir" ]; then
+                    echo "  Removing old deployment: $(basename "$dir")"
+                    rm -rf "$dir"
+                fi
+            done
+
+            echo "✓ Cleaned up $DEPLOYMENTS_TO_DELETE old deployment(s)"
+        else
+            echo "Only $TOTAL_DEPLOYMENTS deployment(s) found, no cleanup needed"
+        fi
+    fi
+fi
+
+# Remove old application files if they exist
+if [ -d "$APP_DIR" ]; then
+    echo "Cleaning up previous application directory..."
+    rm -rf $APP_DIR
+fi
+
+# Create application directory
+mkdir -p $APP_DIR
+
+# Clean up old log files (older than 7 days)
+if [ -d "/var/log" ]; then
+    echo "Cleaning up old log files..."
+    find /var/log -type f -name "*.log.*" -mtime +7 -delete 2>/dev/null || true
+    find /var/log -type f -name "*.gz" -mtime +7 -delete 2>/dev/null || true
+fi
+
+echo "✓ System prepared for installation"
+EOF
+
+            # after_install.sh - Configure deployment (NO BUILD/INSTALL STEPS)
+            cat > "${scripts_dir}/after_install.sh" << 'EOF'
+#!/bin/bash
+# AfterInstall: Configure deployment
+# NOTE: Dependencies and build are handled by CodeBuild (buildspec.yml)
+#       This script should NOT install or build anything
+# NOTE: .env file is created during build and included in the artifact
+
+set -e
+
+APP_DIR="/app"
+
+echo "Configuring deployment..."
+
+# Set proper permissions
+chown -R ubuntu:ubuntu "$APP_DIR"
+chmod +x "$APP_DIR/scripts"/*.sh 2>/dev/null || true
+
+# Set permissions on .env file (created during build)
+if [ -f "$APP_DIR/.env" ]; then
+    chmod 600 "$APP_DIR/.env"
+    echo "✓ Found .env file from build artifact"
+else
+    echo "Warning: .env file not found in artifact"
+fi
+
+echo "Deployment configured successfully"
+echo "NOTE: If using CodeBuild, dependencies are already installed in the artifact"
+EOF
+
+            # start_server.sh
+            cat > "${scripts_dir}/start_server.sh" << 'EOF'
+#!/bin/bash
+# ApplicationStart: Start Python application
+
+set -e
+
+APP_DIR="/app"
+cd $APP_DIR
+
+# Start application with gunicorn or your preferred server
+source venv/bin/activate
+gunicorn -w 4 -b 0.0.0.0:8000 app:app &
+
+echo "Application started successfully"
+EOF
+
+            # stop_server.sh
+            cat > "${scripts_dir}/stop_server.sh" << 'EOF'
+#!/bin/bash
+# ApplicationStop: Stop Python application
+
+# Stop gunicorn processes
+pkill -f gunicorn || true
+
+echo "Application stopped successfully"
+EOF
+            ;;
+
+        *)
+            # Generic scripts
+            cat > "${scripts_dir}/before_install.sh" << 'EOF'
+#!/bin/bash
+# BeforeInstall: Clean up previous deployment and prepare system
+
+set -e
+
+APP_DIR="/app"
+CODEDEPLOY_ROOT="/opt/codedeploy-agent/deployment-root"
+DEPLOYMENT_GROUP_ID="${DEPLOYMENT_GROUP_ID:-}"
+MAX_DEPLOYMENTS_TO_KEEP=3
+
+echo "Starting cleanup process..."
+
+# Clean up old CodeDeploy deployment archives to free disk space
+if [ -d "$CODEDEPLOY_ROOT" ] && [ -n "$DEPLOYMENT_GROUP_ID" ]; then
+    echo "Cleaning up old deployment archives..."
+    DEPLOYMENT_GROUP_DIR="$CODEDEPLOY_ROOT/$DEPLOYMENT_GROUP_ID"
+
+    if [ -d "$DEPLOYMENT_GROUP_DIR" ]; then
+        # Get list of deployment directories sorted by modification time (oldest first)
+        # Keep only the most recent N deployments
+        DEPLOYMENT_DIRS=$(find "$DEPLOYMENT_GROUP_DIR" -maxdepth 1 -type d -name "d-*" -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+        TOTAL_DEPLOYMENTS=$(echo "$DEPLOYMENT_DIRS" | grep -c "d-" || echo "0")
+
+        if [ "$TOTAL_DEPLOYMENTS" -gt "$MAX_DEPLOYMENTS_TO_KEEP" ]; then
+            DEPLOYMENTS_TO_DELETE=$((TOTAL_DEPLOYMENTS - MAX_DEPLOYMENTS_TO_KEEP))
+            echo "Found $TOTAL_DEPLOYMENTS deployments, removing oldest $DEPLOYMENTS_TO_DELETE..."
+
+            echo "$DEPLOYMENT_DIRS" | head -n "$DEPLOYMENTS_TO_DELETE" | while read -r dir; do
+                if [ -d "$dir" ]; then
+                    echo "  Removing old deployment: $(basename "$dir")"
+                    rm -rf "$dir"
+                fi
+            done
+
+            echo "✓ Cleaned up $DEPLOYMENTS_TO_DELETE old deployment(s)"
+        else
+            echo "Only $TOTAL_DEPLOYMENTS deployment(s) found, no cleanup needed"
+        fi
+    fi
+fi
+
+# Remove old application files if they exist
+if [ -d "$APP_DIR" ]; then
+    echo "Cleaning up previous application directory..."
+    rm -rf $APP_DIR
+fi
+
+# Create application directory
+mkdir -p $APP_DIR
+
+# Clean up old log files (older than 7 days)
+if [ -d "/var/log" ]; then
+    echo "Cleaning up old log files..."
+    find /var/log -type f -name "*.log.*" -mtime +7 -delete 2>/dev/null || true
+    find /var/log -type f -name "*.gz" -mtime +7 -delete 2>/dev/null || true
+fi
+
+echo "✓ System prepared for installation"
+EOF
+
+            cat > "${scripts_dir}/after_install.sh" << 'EOF'
+#!/bin/bash
+# AfterInstall: Configure deployment
+# NOTE: Dependencies and build are handled by CodeBuild (buildspec.yml)
+#       This script should NOT install or build anything
+# NOTE: .env file is created during build and included in the artifact
+
+set -e
+
+APP_DIR="/app"
+
+echo "Configuring deployment..."
+
+# Set proper permissions
+chown -R ubuntu:ubuntu "$APP_DIR"
+chmod +x "$APP_DIR/scripts"/*.sh 2>/dev/null || true
+
+# Set permissions on .env file (created during build)
+if [ -f "$APP_DIR/.env" ]; then
+    chmod 600 "$APP_DIR/.env"
+    echo "✓ Found .env file from build artifact"
+else
+    echo "Warning: .env file not found in artifact"
+fi
+
+echo "Deployment configured successfully"
+echo "NOTE: If using CodeBuild, dependencies are already installed in the artifact"
+EOF
+
+            cat > "${scripts_dir}/start_server.sh" << 'EOF'
+#!/bin/bash
+# ApplicationStart: Start your application
+
+set -e
+
+APP_DIR="/app"
+cd "$APP_DIR"
+
+# Add commands to start your application
+echo "Application started successfully"
+EOF
+
+            cat > "${scripts_dir}/stop_server.sh" << 'EOF'
+#!/bin/bash
+# ApplicationStop: Stop your application
+
+# Add commands to stop your application
+echo "Application stopped successfully"
+EOF
+            ;;
+    esac
+
+    # Make scripts executable
+    chmod +x "${scripts_dir}"/*.sh
+
+    return 0
+}
+
+# Function to format timestamp
+format_timestamp() {
+    local timestamp=$1
+
+    if command -v date >/dev/null 2>&1; then
+        date -d "$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "$timestamp"
+    else
+        echo "$timestamp"
+    fi
+}
+
+# Function to print box header
+print_box_header() {
+    local title=$1
+    local width=${2:-75}
+
+    echo -e "${CD_BOLD}${CD_CYAN}╔$(printf '═%.0s' $(seq 1 $((width-2))))╗${CD_RESET}"
+    printf "${CD_BOLD}${CD_CYAN}║${CD_RESET}  ${CD_BOLD}%-$((width-4))s${CD_RESET}  ${CD_BOLD}${CD_CYAN}║${CD_RESET}\n" "$title"
+    echo -e "${CD_BOLD}${CD_CYAN}╟$(printf '─%.0s' $(seq 1 $((width-2))))╢${CD_RESET}"
+}
+
+# Function to print box footer
+print_box_footer() {
+    local width=${1:-75}
+
+    echo -e "${CD_BOLD}${CD_CYAN}║${CD_RESET}"
+    echo -e "${CD_BOLD}${CD_CYAN}╚$(printf '═%.0s' $(seq 1 $((width-2))))╝${CD_RESET}"
+}
+
+# Function to print box line
+print_box_line() {
+    local label=$1
+    local value=$2
+    local width=${3:-75}
+
+    printf "${CD_BOLD}${CD_CYAN}║${CD_RESET}  ${CD_DIM}%-20s${CD_RESET} ${CD_GREEN}%-$((width-25))s${CD_RESET} ${CD_BOLD}${CD_CYAN}║${CD_RESET}\n" \
+        "$label" "$value"
+}
+
+# ============================================================================
+# Auto Scaling Group Functions
+# ============================================================================
+
+# Function to list existing Auto Scaling Groups
+list_asgs() {
+    local region=${1:-$AWS_REGION}
+
+    aws autoscaling describe-auto-scaling-groups \
+        --region "$region" \
+        --query 'AutoScalingGroups[].AutoScalingGroupName' \
+        --output text 2>/dev/null | tr '\t' '\n'
+}
+
+# Function to get latest Amazon Linux 2023 AMI
+get_latest_al2023_ami() {
+    local region=${1:-$AWS_REGION}
+
+    aws ec2 describe-images \
+        --region "$region" \
+        --owners amazon \
+        --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
+                  "Name=state,Values=available" \
+        --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+        --output text 2>/dev/null
+}
+
+# Function to get latest Ubuntu 22.04 LTS AMI
+get_latest_ubuntu_ami() {
+    local region=${1:-$AWS_REGION}
+
+    aws ec2 describe-images \
+        --region "$region" \
+        --owners 099720109477 \
+        --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+                  "Name=state,Values=available" \
+        --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+        --output text 2>/dev/null
+}
+
+# Function to get latest Amazon Linux 2 AMI
+get_latest_al2_ami() {
+    local region=${1:-$AWS_REGION}
+
+    aws ec2 describe-images \
+        --region "$region" \
+        --owners amazon \
+        --filters "Name=name,Values=amzn2-ami-hvm-*-x86_64-gp2" \
+                  "Name=state,Values=available" \
+        --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+        --output text 2>/dev/null
+}
+
+# Function to list custom AMIs (owned by account)
+list_custom_amis() {
+    local region=${1:-$AWS_REGION}
+
+    aws ec2 describe-images \
+        --region "$region" \
+        --owners self \
+        --filters "Name=state,Values=available" \
+        --query 'Images[].[ImageId,Name,CreationDate]' \
+        --output text 2>/dev/null | sort -k3 -r
+}
+
+# Function to list existing launch templates
+list_launch_templates() {
+    local region=${1:-$AWS_REGION}
+
+    aws ec2 describe-launch-templates \
+        --region "$region" \
+        --query 'LaunchTemplates[].[LaunchTemplateId,LaunchTemplateName,CreateTime]' \
+        --output text 2>/dev/null | sort -k3 -r
+}
+
+# Function to get launch template details (full info)
+get_launch_template_details() {
+    local template_id=$1
+    local region=${2:-$AWS_REGION}
+
+    aws ec2 describe-launch-template-versions \
+        --region "$region" \
+        --launch-template-id "$template_id" \
+        --versions '$Latest' \
+        --query 'LaunchTemplateVersions[0].LaunchTemplateData' \
+        --output json 2>/dev/null
+}
+
+# Function to get launch template summary (AMI and instance type)
+get_launch_template_info() {
+    local template_id=$1
+    local region=${2:-$AWS_REGION}
+
+    aws ec2 describe-launch-template-versions \
+        --region "$region" \
+        --launch-template-id "$template_id" \
+        --versions '$Latest' \
+        --query 'LaunchTemplateVersions[0].LaunchTemplateData.[ImageId,InstanceType]' \
+        --output text 2>/dev/null
+}
+
+# Function to create launch template for CodeDeploy
+create_launch_template() {
+    local template_name=$1
+    local ami_id=$2
+    local instance_type=$3
+    local security_group_id=$4
+    local key_name=$5
+    local instance_profile_arn=$6
+    local region=${7:-$AWS_REGION}
+
+    # Create user data script to install CodeDeploy agent
+    local user_data=$(cat <<'EOF'
+#!/bin/bash
+
+# ==============================================================================
+# PART 1: Install CodeDeploy Agent (Required for deployments)
+# ==============================================================================
+
+# Install dependencies
+apt-get update
+apt-get install -y ruby-full wget
+
+# Download and install CodeDeploy agent for us-east-2
+cd /tmp
+wget https://aws-codedeploy-${AWS_REGION}.s3.${AWS_REGION}.amazonaws.com/latest/install
+chmod +x ./install
+./install auto
+
+# Start and enable CodeDeploy agent
+systemctl start codedeploy-agent
+systemctl enable codedeploy-agent
+
+# ==============================================================================
+# PART 2: Application Setup (node, pm2)
+# ==============================================================================
+
+# Install NVM, Node, and PM2 as ubuntu user (without heredoc)
+su - ubuntu -c '
+export HOME=/home/ubuntu
+cd /home/ubuntu
+
+# Install NVM
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+
+# Load NVM
+export NVM_DIR="/home/ubuntu/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+# Install Node 22
+nvm install 22
+
+# Install PM2
+npm install pm2@latest -g
+'
+EOF
+)
+
+    # Replace ${AWS_REGION} in user data
+    user_data=$(echo "$user_data" | sed "s/\${AWS_REGION}/$region/g")
+
+    # Encode user data to base64
+    local user_data_b64=$(echo "$user_data" | base64 -w 0)
+
+    # Check if template already exists
+    if aws ec2 describe-launch-templates \
+        --region "$region" \
+        --launch-template-names "$template_name" \
+        --output text &>/dev/null; then
+
+        prompt_warning "Launch template $template_name already exists"
+
+        # Get existing template ID
+        aws ec2 describe-launch-templates \
+            --region "$region" \
+            --launch-template-names "$template_name" \
+            --query 'LaunchTemplates[0].LaunchTemplateId' \
+            --output text
+        return 0
+    fi
+
+    # Extract instance profile name from ARN (format: arn:aws:iam::account:instance-profile/name)
+    # We need just the name for the launch template
+    local instance_profile_name=$(echo "$instance_profile_arn" | sed 's|.*/||')
+
+    # Create launch template
+    local template_id=$(aws ec2 create-launch-template \
+        --region "$region" \
+        --launch-template-name "$template_name" \
+        --launch-template-data "{
+            \"ImageId\": \"$ami_id\",
+            \"InstanceType\": \"$instance_type\",
+            \"SecurityGroupIds\": [\"$security_group_id\"],
+            \"KeyName\": \"$key_name\",
+            \"IamInstanceProfile\": {
+                \"Name\": \"$instance_profile_name\"
+            },
+            \"UserData\": \"$user_data_b64\",
+            \"TagSpecifications\": [{
+                \"ResourceType\": \"instance\",
+                \"Tags\": [{
+                    \"Key\": \"Name\",
+                    \"Value\": \"$template_name\"
+                }]
+            }]
+        }" \
+        --query 'LaunchTemplate.LaunchTemplateId' \
+        --output text 2>&1)
+
+    if [ $? -ne 0 ]; then
+        prompt_error "Failed to create launch template"
+        echo "$template_id" >&2
+        return 1
+    fi
+
+    echo "$template_id"
+}
+
+# Function to create Auto Scaling Group
+create_asg() {
+    local asg_name=$1
+    local launch_template_id=$2
+    local subnet_ids=$3  # Comma-separated
+    local min_size=$4
+    local max_size=$5
+    local desired_capacity=$6
+    local target_group_arns=$7  # Optional: Target group ARNs for load balancer attachment
+    local region=${8:-$AWS_REGION}
+
+    # Check if ASG already exists - must check the ACTUAL OUTPUT, not just exit code
+    local existing_asg=$(aws autoscaling describe-auto-scaling-groups \
+        --region "$region" \
+        --auto-scaling-group-names "$asg_name" \
+        --query 'AutoScalingGroups[0].AutoScalingGroupName' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_asg" ] && [ "$existing_asg" = "$asg_name" ]; then
+        prompt_warning "Auto Scaling Group $asg_name already exists"
+        echo "$asg_name"
+        return 0
+    fi
+
+    # Verify the launch template exists
+    local lt_check=$(aws ec2 describe-launch-templates \
+        --region "$region" \
+        --launch-template-ids "$launch_template_id" \
+        --query 'LaunchTemplates[0].LaunchTemplateId' \
+        --output text 2>/dev/null)
+
+    if [ -z "$lt_check" ] || [ "$lt_check" = "None" ]; then
+        prompt_error "Launch template $launch_template_id does not exist!"
+        return 1
+    fi
+
+    # Create Auto Scaling Group
+    # Build optional target group ARNs parameter
+    local tg_param=""
+    if [ -n "$target_group_arns" ]; then
+        tg_param="--target-group-arns $target_group_arns"
+    fi
+
+    local create_output
+    local create_result
+    set +e
+    create_output=$(aws autoscaling create-auto-scaling-group \
+        --region "$region" \
+        --auto-scaling-group-name "$asg_name" \
+        --launch-template "LaunchTemplateId=$launch_template_id,Version=\$Latest" \
+        --min-size "$min_size" \
+        --max-size "$max_size" \
+        --desired-capacity "$desired_capacity" \
+        --vpc-zone-identifier "$subnet_ids" \
+        --health-check-type EC2 \
+        --health-check-grace-period 300 \
+        $tg_param \
+        --tags "Key=Name,Value=$asg_name,PropagateAtLaunch=true" \
+        --tags "Key=ManagedBy,Value=codedeploy-setup,PropagateAtLaunch=true" \
+        2>&1)
+    create_result=$?
+    set -e
+
+    if [ $create_result -ne 0 ]; then
+        prompt_error "Failed to create Auto Scaling Group"
+        if [ -n "$create_output" ]; then
+            echo "$create_output" >&2
+        fi
+        return 1
+    fi
+
+    # Verify the ASG was created successfully
+    local attempts=0
+    local max_attempts=3
+    local asg_found=false
+
+    while [ $attempts -lt $max_attempts ]; do
+        attempts=$((attempts + 1))
+
+        local verify_output=$(aws autoscaling describe-auto-scaling-groups \
+            --region "$region" \
+            --auto-scaling-group-names "$asg_name" \
+            --query 'AutoScalingGroups[0].AutoScalingGroupName' \
+            --output text 2>/dev/null)
+
+        if [ -n "$verify_output" ] && [ "$verify_output" != "None" ] && [ "$verify_output" = "$asg_name" ]; then
+            asg_found=true
+            break
+        fi
+
+        if [ $attempts -lt $max_attempts ]; then
+            sleep 3
+        fi
+    done
+
+    if [ "$asg_found" = false ]; then
+        prompt_error "ASG creation verification failed - '$asg_name' not found in AWS"
+        return 1
+    fi
+
+    prompt_success "Auto Scaling Group created: $asg_name"
+    echo "$asg_name"
+}
+
+# ============================================================================
+# Application Load Balancer Functions
+# ============================================================================
+
+# Function to create security group for ALB
+create_alb_security_group() {
+    local sg_name=$1
+    local vpc_id=$2
+    local description=${3:-"Security group for Application Load Balancer"}
+    local region=${4:-$AWS_REGION}
+
+    # Check if security group already exists
+    local existing_sg=$(aws ec2 describe-security-groups \
+        --filters "Name=group-name,Values=$sg_name" "Name=vpc-id,Values=$vpc_id" \
+        --region "$region" \
+        --query 'SecurityGroups[0].GroupId' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_sg" ] && [ "$existing_sg" != "None" ]; then
+        echo "$existing_sg"
+        return 0
+    fi
+
+    # Create security group
+    local sg_id=$(aws ec2 create-security-group \
+        --group-name "$sg_name" \
+        --description "$description" \
+        --vpc-id "$vpc_id" \
+        --region "$region" \
+        --query 'GroupId' \
+        --output text 2>&1)
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create security group" >&2
+        return 1
+    fi
+
+    # Add inbound rules for HTTP and HTTPS
+    aws ec2 authorize-security-group-ingress \
+        --group-id "$sg_id" \
+        --protocol tcp \
+        --port 80 \
+        --cidr 0.0.0.0/0 \
+        --region "$region" \
+        &>/dev/null
+
+    aws ec2 authorize-security-group-ingress \
+        --group-id "$sg_id" \
+        --protocol tcp \
+        --port 443 \
+        --cidr 0.0.0.0/0 \
+        --region "$region" \
+        &>/dev/null
+
+    # Add tags
+    aws ec2 create-tags \
+        --resources "$sg_id" \
+        --tags "Key=Name,Value=$sg_name" \
+        --region "$region" \
+        &>/dev/null
+
+    echo "$sg_id"
+}
+
+# Function to create target group
+create_target_group() {
+    local tg_name=$1
+    local vpc_id=$2
+    local port=${3:-80}
+    local protocol=${4:-HTTP}
+    local health_check_path=${5:-/}
+    local region=${6:-$AWS_REGION}
+
+    # Check if target group already exists
+    local existing_tg=$(aws elbv2 describe-target-groups \
+        --names "$tg_name" \
+        --region "$region" \
+        --query 'TargetGroups[0].TargetGroupArn' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_tg" ] && [ "$existing_tg" != "None" ]; then
+        echo "$existing_tg"
+        return 0
+    fi
+
+    # Create target group
+    local tg_arn=$(aws elbv2 create-target-group \
+        --name "$tg_name" \
+        --protocol "$protocol" \
+        --port "$port" \
+        --vpc-id "$vpc_id" \
+        --health-check-enabled \
+        --health-check-protocol "$protocol" \
+        --health-check-path "$health_check_path" \
+        --health-check-interval-seconds 30 \
+        --health-check-timeout-seconds 5 \
+        --healthy-threshold-count 2 \
+        --unhealthy-threshold-count 3 \
+        --target-type instance \
+        --region "$region" \
+        --query 'TargetGroups[0].TargetGroupArn' \
+        --output text 2>&1)
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create target group" >&2
+        return 1
+    fi
+
+    echo "$tg_arn"
+}
+
+# Function to create Application Load Balancer
+create_application_load_balancer() {
+    local alb_name=$1
+    local security_group_id=$2
+    local subnet_ids=$3  # Comma-separated (needs at least 2 subnets in different AZs)
+    local scheme=${4:-internet-facing}  # internet-facing or internal
+    local region=${5:-$AWS_REGION}
+
+    # Check if ALB already exists
+    local existing_alb=$(aws elbv2 describe-load-balancers \
+        --names "$alb_name" \
+        --region "$region" \
+        --query 'LoadBalancers[0].LoadBalancerArn' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_alb" ] && [ "$existing_alb" != "None" ]; then
+        echo "$existing_alb"
+        return 0
+    fi
+
+    # Convert comma-separated subnet IDs to space-separated
+    local subnet_array=$(echo "$subnet_ids" | tr ',' ' ')
+
+    # Create ALB
+    local alb_arn=$(aws elbv2 create-load-balancer \
+        --name "$alb_name" \
+        --subnets $subnet_array \
+        --security-groups "$security_group_id" \
+        --scheme "$scheme" \
+        --type application \
+        --ip-address-type ipv4 \
+        --region "$region" \
+        --query 'LoadBalancers[0].LoadBalancerArn' \
+        --output text 2>&1)
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create load balancer" >&2
+        return 1
+    fi
+
+    # Add tags
+    aws elbv2 add-tags \
+        --resource-arns "$alb_arn" \
+        --tags "Key=Name,Value=$alb_name" \
+        --region "$region" \
+        &>/dev/null
+
+    echo "$alb_arn"
+}
+
+# Function to create ALB listener
+create_alb_listener() {
+    local alb_arn=$1
+    local target_group_arn=$2
+    local port=${3:-80}
+    local protocol=${4:-HTTP}
+    local region=${5:-$AWS_REGION}
+
+    # Check if listener already exists
+    local existing_listener=$(aws elbv2 describe-listeners \
+        --load-balancer-arn "$alb_arn" \
+        --region "$region" \
+        --query "Listeners[?Port==\`$port\` && Protocol==\`$protocol\`].ListenerArn" \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_listener" ] && [ "$existing_listener" != "None" ]; then
+        echo "$existing_listener"
+        return 0
+    fi
+
+    # Create listener
+    local listener_arn=$(aws elbv2 create-listener \
+        --load-balancer-arn "$alb_arn" \
+        --protocol "$protocol" \
+        --port "$port" \
+        --default-actions "Type=forward,TargetGroupArn=$target_group_arn" \
+        --region "$region" \
+        --query 'Listeners[0].ListenerArn' \
+        --output text 2>&1)
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create listener" >&2
+        return 1
+    fi
+
+    echo "$listener_arn"
+}
+
+# Function to get VPC ID from subnet
+get_vpc_from_subnet() {
+    local subnet_id=$1
+    local region=${2:-$AWS_REGION}
+
+    aws ec2 describe-subnets \
+        --subnet-ids "$subnet_id" \
+        --region "$region" \
+        --query 'Subnets[0].VpcId' \
+        --output text 2>/dev/null
+}

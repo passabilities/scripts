@@ -1,0 +1,912 @@
+#!/bin/bash
+
+# CodePipeline Library
+# Shared functions for AWS CodePipeline and CodeBuild automation
+
+# ============================================================================
+# IAM Role Functions
+# ============================================================================
+
+# Function to create CodePipeline service role
+create_codepipeline_service_role() {
+    local role_name=$1
+    local region=${2:-$AWS_REGION}
+    local project_name=${3:-}
+
+    # Create trust policy
+    local trust_policy=$(cat <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "codepipeline.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+)
+
+    # Check if role already exists
+    local existing_arn=$(aws iam get-role \
+        --role-name "$role_name" \
+        --query 'Role.Arn' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_arn" ] && [ "$existing_arn" != "None" ]; then
+        # Update trust policy to ensure it's correct
+        aws iam update-assume-role-policy \
+            --role-name "$role_name" \
+            --policy-document "$trust_policy" \
+            &>/dev/null
+        echo "$existing_arn"
+        return 0
+    fi
+
+    # Create role
+    if [ -n "$project_name" ]; then
+        aws iam create-role \
+            --role-name "$role_name" \
+            --assume-role-policy-document "$trust_policy" \
+            --description "Service role for AWS CodePipeline" \
+            --tags Key=Project,Value="$project_name" \
+            --output text &>/dev/null
+    else
+        aws iam create-role \
+            --role-name "$role_name" \
+            --assume-role-policy-document "$trust_policy" \
+            --description "Service role for AWS CodePipeline" \
+            --output text &>/dev/null
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create CodePipeline role" >&2
+        return 1
+    fi
+
+    # Create inline policy for CodePipeline permissions
+    local pipeline_policy=$(cat <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:PutObject",
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:BatchGetBuilds",
+        "codebuild:StartBuild"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "codedeploy:CreateDeployment",
+        "codedeploy:GetApplication",
+        "codedeploy:GetApplicationRevision",
+        "codedeploy:GetDeployment",
+        "codedeploy:GetDeploymentConfig",
+        "codedeploy:RegisterApplicationRevision"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "codestar-connections:UseConnection"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+)
+
+    aws iam put-role-policy \
+        --role-name "$role_name" \
+        --policy-name "CodePipelineServicePolicy" \
+        --policy-document "$pipeline_policy" \
+        &>/dev/null
+
+    # Wait for IAM role propagation (trust policy needs time to propagate globally)
+    # AWS recommends waiting up to 10 seconds for IAM changes
+    echo "Waiting for IAM role to propagate..." >&2
+    sleep 10
+
+    # Return role ARN
+    aws iam get-role \
+        --role-name "$role_name" \
+        --query 'Role.Arn' \
+        --output text 2>/dev/null
+}
+
+# Function to create CodeBuild service role
+create_codebuild_service_role() {
+    local role_name=$1
+    local region=${2:-$AWS_REGION}
+    local project_name=${3:-}
+
+    # Create trust policy
+    local trust_policy=$(cat <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "codebuild.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+)
+
+    # Check if role already exists
+    local existing_arn=$(aws iam get-role \
+        --role-name "$role_name" \
+        --query 'Role.Arn' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_arn" ] && [ "$existing_arn" != "None" ]; then
+        # Update trust policy to ensure it's correct
+        aws iam update-assume-role-policy \
+            --role-name "$role_name" \
+            --policy-document "$trust_policy" \
+            &>/dev/null
+        echo "$existing_arn"
+        return 0
+    fi
+
+    # Create role
+    if [ -n "$project_name" ]; then
+        aws iam create-role \
+            --role-name "$role_name" \
+            --assume-role-policy-document "$trust_policy" \
+            --description "Service role for AWS CodeBuild" \
+            --tags Key=Project,Value="$project_name" \
+            --output text &>/dev/null
+    else
+        aws iam create-role \
+            --role-name "$role_name" \
+            --assume-role-policy-document "$trust_policy" \
+            --description "Service role for AWS CodeBuild" \
+            --output text &>/dev/null
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create CodeBuild role" >&2
+        return 1
+    fi
+
+    # Create inline policy for CodeBuild permissions
+    local build_policy=$(cat <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:PutObject",
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameters",
+        "ssm:GetParameter",
+        "ssm:GetParametersByPath"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+)
+
+    aws iam put-role-policy \
+        --role-name "$role_name" \
+        --policy-name "CodeBuildServicePolicy" \
+        --policy-document "$build_policy" \
+        &>/dev/null
+
+    # Wait for IAM role propagation (trust policy needs time to propagate globally)
+    # AWS recommends waiting up to 10 seconds for IAM changes
+    echo "Waiting for IAM role to propagate..." >&2
+    sleep 10
+
+    # Return role ARN
+    aws iam get-role \
+        --role-name "$role_name" \
+        --query 'Role.Arn' \
+        --output text 2>/dev/null
+}
+
+# ============================================================================
+# Environment Variable Functions
+# ============================================================================
+
+# Function to create/update SSM parameters for runtime environment variables
+create_runtime_env_vars() {
+    local project_name=$1
+    local environment=$2
+    local env_vars=$3  # JSON string: {"KEY1":"value1","KEY2":"value2"}
+    local region=${4:-$AWS_REGION}
+
+    if [ -z "$env_vars" ] || [ "$env_vars" = "{}" ]; then
+        return 0
+    fi
+
+    # Parse JSON and create SSM parameters
+    echo "$env_vars" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
+        local param_name="/${project_name}/${environment}/${key}"
+
+        # Create or update parameter
+        aws ssm put-parameter \
+            --name "$param_name" \
+            --value "$value" \
+            --type "SecureString" \
+            --overwrite \
+            --region "$region" \
+            &>/dev/null
+
+        if [ $? -eq 0 ]; then
+            echo "  ✓ Created SSM parameter: $param_name" >&2
+        else
+            echo "  ✗ Failed to create SSM parameter: $param_name" >&2
+        fi
+    done
+}
+
+# Function to generate buildspec.yml template
+# Note: This creates a TEMPLATE - users should customize it for their needs
+generate_buildspec_template() {
+    local project_type=$1
+    local build_command=$2
+    local project_name=$3
+    local environment=$4
+    local build_env_vars=$5  # Pre-formatted parameter-store variables
+    local output_file=${6:-"buildspec.yml.template"}
+
+    # Start building the buildspec file
+    cat > "$output_file" << EOF
+version: 0.2
+EOF
+
+    # Note: Environment variables are now loaded dynamically in pre_build phase
+    # based on the detected branch/environment mapping
+
+    # Add phases section based on project type
+    case "$project_type" in
+        nodejs)
+            cat >> "$output_file" << 'EOF'
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+  pre_build:
+    commands:
+      # Use BRANCH_NAME environment variable passed from CodeBuild configuration
+      - |
+        echo "Building branch: $BRANCH_NAME"
+
+        # Map branch to environment
+        case "$BRANCH_NAME" in
+          main)
+            export DEPLOY_ENV=production
+            ;;
+          staging)
+            export DEPLOY_ENV=staging
+            ;;
+          develop)
+            export DEPLOY_ENV=development
+            ;;
+          *)
+            export DEPLOY_ENV=development
+            ;;
+        esac
+        echo "Deployment environment: $DEPLOY_ENV"
+      # Load build environment variables from SSM
+      - |
+        echo "Loading build environment variables for $DEPLOY_ENV..."
+        aws ssm get-parameters-by-path \
+          --path "/PROJECT_NAME/$DEPLOY_ENV/build" \
+          --with-decryption \
+          --region $AWS_REGION \
+          --output json | jq -r '.Parameters[] | "export \(.Name | split("/")[-1])=\"\(.Value)\""' > /tmp/build_env.sh
+        if [ -s /tmp/build_env.sh ]; then
+          . /tmp/build_env.sh
+          echo "Build environment variables loaded"
+        fi
+      - echo "Installing dependencies..."
+      - npm ci
+  build:
+    commands:
+      - echo "Building application..."
+      - npm run build
+  post_build:
+    commands:
+      - echo "Build completed for $DEPLOY_ENV environment"
+      # Create .env file with runtime environment variables
+      - |
+        echo "Creating .env file with runtime environment variables..."
+        aws ssm get-parameters-by-path \
+          --path "/PROJECT_NAME/$DEPLOY_ENV" \
+          --with-decryption \
+          --region $AWS_REGION \
+          --output json | jq -r '.Parameters[] | "\(.Name | split("/")[-1])=\(.Value)"' > .env
+
+        # Add NODE_ENV
+        echo "NODE_ENV=$DEPLOY_ENV" >> .env
+
+        if [ -s .env ]; then
+          echo "Runtime environment variables loaded to .env"
+          cat .env | sed 's/=.*//' | sed 's/^/  ✓ /'
+        else
+          echo "No runtime environment variables found"
+          echo "NODE_ENV=$DEPLOY_ENV" > .env
+        fi
+
+artifacts:
+  files:
+    - node_modules/**/*
+    - dist/**/*
+    - scripts/**/*
+    - package.json
+    - appspec.yml
+    - .env
+EOF
+            ;;
+        python)
+            cat >> "$output_file" << 'EOF'
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+  pre_build:
+    commands:
+      # Use BRANCH_NAME environment variable passed from CodeBuild configuration
+      - |
+        echo "Building branch: $BRANCH_NAME"
+
+        # Map branch to environment
+        case "$BRANCH_NAME" in
+          main)
+            export DEPLOY_ENV=production
+            ;;
+          staging)
+            export DEPLOY_ENV=staging
+            ;;
+          develop)
+            export DEPLOY_ENV=development
+            ;;
+          *)
+            export DEPLOY_ENV=development
+            ;;
+        esac
+        echo "Deployment environment: $DEPLOY_ENV"
+      # Load build environment variables from SSM
+      - |
+        echo "Loading build environment variables for $DEPLOY_ENV..."
+        aws ssm get-parameters-by-path \
+          --path "/PROJECT_NAME/$DEPLOY_ENV/build" \
+          --with-decryption \
+          --region $AWS_REGION \
+          --output json | jq -r '.Parameters[] | "export \(.Name | split("/")[-1])=\"\(.Value)\""' > /tmp/build_env.sh
+        if [ -s /tmp/build_env.sh ]; then
+          . /tmp/build_env.sh
+          echo "Build environment variables loaded"
+        fi
+      - echo "Installing dependencies..."
+      - pip install -r requirements.txt
+  build:
+    commands:
+      - echo "Building application..."
+      - echo "Add your build commands here"
+  post_build:
+    commands:
+      - echo "Build completed for $DEPLOY_ENV environment"
+      # Create .env file with runtime environment variables
+      - |
+        echo "Creating .env file with runtime environment variables..."
+        aws ssm get-parameters-by-path \
+          --path "/PROJECT_NAME/$DEPLOY_ENV" \
+          --with-decryption \
+          --region $AWS_REGION \
+          --output json | jq -r '.Parameters[] | "\(.Name | split("/")[-1])=\(.Value)"' > .env
+
+        # Add environment variable
+        echo "PYTHON_ENV=$DEPLOY_ENV" >> .env
+
+        if [ -s .env ]; then
+          echo "Runtime environment variables loaded to .env"
+          cat .env | sed 's/=.*//' | sed 's/^/  ✓ /'
+        else
+          echo "No runtime environment variables found"
+          echo "PYTHON_ENV=$DEPLOY_ENV" > .env
+        fi
+
+artifacts:
+  files:
+    - '**/*'
+    - .env
+  exclude-paths:
+    - .git/**/*
+    - __pycache__/**/*
+    - '*.pyc'
+    - venv/**/*
+    - '*.log'
+EOF
+            ;;
+        *)
+            cat >> "$output_file" << 'EOF'
+
+phases:
+  pre_build:
+    commands:
+      # Use BRANCH_NAME environment variable passed from CodeBuild configuration
+      - |
+        echo "Building branch: $BRANCH_NAME"
+
+        # Map branch to environment
+        case "$BRANCH_NAME" in
+          main)
+            export DEPLOY_ENV=production
+            ;;
+          staging)
+            export DEPLOY_ENV=staging
+            ;;
+          develop)
+            export DEPLOY_ENV=development
+            ;;
+          *)
+            export DEPLOY_ENV=development
+            ;;
+        esac
+        echo "Deployment environment: $DEPLOY_ENV"
+      # Load build environment variables from SSM
+      - |
+        echo "Loading build environment variables for $DEPLOY_ENV..."
+        aws ssm get-parameters-by-path \
+          --path "/PROJECT_NAME/$DEPLOY_ENV/build" \
+          --with-decryption \
+          --region $AWS_REGION \
+          --output json | jq -r '.Parameters[] | "export \(.Name | split("/")[-1])=\"\(.Value)\""' > /tmp/build_env.sh
+        if [ -s /tmp/build_env.sh ]; then
+          . /tmp/build_env.sh
+          echo "Build environment variables loaded"
+        fi
+  build:
+    commands:
+      - echo "Building application..."
+      - echo "Add your build commands here"
+  post_build:
+    commands:
+      - echo "Build completed for $DEPLOY_ENV environment"
+      # Create .env file with runtime environment variables
+      - |
+        echo "Creating .env file with runtime environment variables..."
+        aws ssm get-parameters-by-path \
+          --path "/PROJECT_NAME/$DEPLOY_ENV" \
+          --with-decryption \
+          --region $AWS_REGION \
+          --output json | jq -r '.Parameters[] | "\(.Name | split("/")[-1])=\(.Value)"' > .env
+
+        # Add environment variable
+        echo "ENV=$DEPLOY_ENV" >> .env
+
+        if [ -s .env ]; then
+          echo "Runtime environment variables loaded to .env"
+          cat .env | sed 's/=.*//' | sed 's/^/  ✓ /'
+        else
+          echo "No runtime environment variables found"
+          echo "ENV=$DEPLOY_ENV" > .env
+        fi
+
+artifacts:
+  files:
+    - '**/*'
+    - .env
+  exclude-paths:
+    - .git/**/*
+    - '*.log'
+EOF
+            ;;
+    esac
+
+    # Replace placeholders
+    sed -i "s/PROJECT_NAME/${project_name}/g" "$output_file"
+    sed -i "s/ENV/${environment}/g" "$output_file"
+
+    return 0
+}
+
+# Function to generate helper script for fetching runtime environment variables
+generate_env_fetch_script() {
+    local project_name=$1
+    local region=$2
+    local output_file=${3:-"scripts/fetch_env.sh"}
+
+    cat > "$output_file" << 'EOF'
+#!/bin/bash
+# Helper script to fetch runtime environment variables from SSM Parameter Store
+# This should be called from your lifecycle scripts (after_install.sh)
+# Auto-detects environment from CodeDeploy deployment group name
+
+set -e
+
+PROJECT_NAME="PROJECT_NAME_PLACEHOLDER"
+REGION="REGION_PLACEHOLDER"
+APP_DIR="/app"
+ENV_FILE="${APP_DIR}/.env"
+
+# Auto-detect environment from CodeDeploy deployment group name
+# Deployment group names follow pattern: project-dg-{environment}
+# e.g., "myproject-dg-production", "myproject-dg-staging", "myproject-dg-development"
+DEPLOYMENT_GROUP_NAME="${DEPLOYMENT_GROUP_NAME:-}"
+
+if [ -z "$DEPLOYMENT_GROUP_NAME" ]; then
+    # Try to get from EC2 instance tags
+    INSTANCE_ID=$(ec2-metadata --instance-id 2>/dev/null | cut -d' ' -f2)
+    if [ -n "$INSTANCE_ID" ]; then
+        DEPLOYMENT_GROUP_NAME=$(aws ec2 describe-tags \
+            --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:autoscaling:groupName" \
+            --region "$REGION" \
+            --query 'Tags[0].Value' \
+            --output text 2>/dev/null || echo "")
+    fi
+fi
+
+# Extract environment from deployment group name (last segment after last hyphen)
+if [ -n "$DEPLOYMENT_GROUP_NAME" ]; then
+    ENVIRONMENT=$(echo "$DEPLOYMENT_GROUP_NAME" | awk -F'-' '{print $NF}')
+else
+    echo "Warning: Could not detect deployment group name, defaulting to production"
+    ENVIRONMENT="production"
+fi
+
+echo "Fetching runtime environment variables from SSM Parameter Store..."
+echo "Detected environment: $ENVIRONMENT"
+
+# Clear existing .env file
+> "$ENV_FILE"
+
+# Fetch runtime environment variables
+RUNTIME_PARAMS=$(aws ssm get-parameters-by-path \
+    --path "/${PROJECT_NAME}/${ENVIRONMENT}" \
+    --with-decryption \
+    --region "$REGION" \
+    --query 'Parameters[*].[Name,Value]' \
+    --output text 2>/dev/null || echo "")
+
+if [ -n "$RUNTIME_PARAMS" ]; then
+    while IFS=$'\t' read -r name value; do
+        # Extract key name (remove path prefix)
+        key=$(echo "$name" | sed "s|/${PROJECT_NAME}/${ENVIRONMENT}/||")
+        echo "${key}=${value}" >> "$ENV_FILE"
+        echo "  ✓ $key"
+    done <<< "$RUNTIME_PARAMS"
+
+    # Add ENVIRONMENT to .env file for application use
+    echo "NODE_ENV=${ENVIRONMENT}" >> "$ENV_FILE"
+    echo "  ✓ NODE_ENV"
+
+    # Set proper permissions
+    chown ubuntu:ubuntu "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    echo "Runtime environment variables loaded successfully to $ENV_FILE"
+else
+    echo "No runtime environment variables found at /${PROJECT_NAME}/${ENVIRONMENT}"
+    echo "Creating empty .env file with NODE_ENV"
+    echo "NODE_ENV=${ENVIRONMENT}" > "$ENV_FILE"
+    chown ubuntu:ubuntu "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+fi
+EOF
+
+    # Replace placeholders
+    sed -i "s/PROJECT_NAME_PLACEHOLDER/${project_name}/g" "$output_file"
+    sed -i "s/REGION_PLACEHOLDER/${region}/g" "$output_file"
+
+    chmod +x "$output_file"
+    return 0
+}
+
+# ============================================================================
+# CodeBuild Functions
+# ============================================================================
+
+# Function to create CodeBuild project
+create_codebuild_project() {
+    local project_name=$1
+    local service_role_arn=$2
+    local buildspec_location=$3  # Path to buildspec.yml in repo
+    local compute_type=${4:-BUILD_GENERAL1_SMALL}
+    local image=${5:-"aws/codebuild/standard:7.0"}
+    local region=${6:-$AWS_REGION}
+    local project_tag=${7:-}
+    local branch_name=${8:-}  # Branch name to pass as environment variable
+
+    # Check if project exists
+    local existing_project=$(aws codebuild batch-get-projects \
+        --names "$project_name" \
+        --region "$region" \
+        --query 'projects[0].name' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_project" ] && [ "$existing_project" != "None" ]; then
+        echo "$project_name"
+        return 0
+    fi
+
+    # Build environment configuration with BRANCH_NAME variable
+    local env_config="{
+        \"type\":\"LINUX_CONTAINER\",
+        \"image\":\"$image\",
+        \"computeType\":\"$compute_type\",
+        \"privilegedMode\":false"
+
+    if [ -n "$branch_name" ]; then
+        env_config="${env_config},
+        \"environmentVariables\":[
+            {\"name\":\"BRANCH_NAME\",\"value\":\"$branch_name\",\"type\":\"PLAINTEXT\"}
+        ]"
+    fi
+
+    env_config="${env_config}
+    }"
+
+    # Create CodeBuild project
+    local error_output
+    if [ -n "$project_tag" ]; then
+        error_output=$(aws codebuild create-project \
+            --name "$project_name" \
+            --source "{\"type\":\"CODEPIPELINE\",\"buildspec\":\"$buildspec_location\"}" \
+            --artifacts "{\"type\":\"CODEPIPELINE\"}" \
+            --environment "$env_config" \
+            --service-role "$service_role_arn" \
+            --tags key=Project,value="$project_tag" \
+            --region "$region" \
+            --output text 2>&1)
+    else
+        error_output=$(aws codebuild create-project \
+            --name "$project_name" \
+            --source "{\"type\":\"CODEPIPELINE\",\"buildspec\":\"$buildspec_location\"}" \
+            --artifacts "{\"type\":\"CODEPIPELINE\"}" \
+            --environment "$env_config" \
+            --service-role "$service_role_arn" \
+            --region "$region" \
+            --output text 2>&1)
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create CodeBuild project: $project_name" >&2
+        echo "Error: $error_output" >&2
+        return 1
+    fi
+
+    echo "$project_name"
+}
+
+# ============================================================================
+# CodePipeline Functions
+# ============================================================================
+
+# Function to create CodePipeline
+create_pipeline() {
+    local pipeline_name=$1
+    local service_role_arn=$2
+    local artifact_bucket=$3
+    local source_config=$4  # JSON: {"type":"GitHub|CodeCommit","repo":"...","branch":"...","connection_arn":"..."}
+    local build_project_name=$5
+    local deploy_app_name=$6
+    local deploy_group_name=$7
+    local region=${8:-$AWS_REGION}
+    local project_tag=${9:-}
+
+    # Check if pipeline exists
+    local existing_pipeline=$(aws codepipeline get-pipeline \
+        --name "$pipeline_name" \
+        --region "$region" \
+        --query 'pipeline.name' \
+        --output text 2>/dev/null)
+
+    if [ -n "$existing_pipeline" ] && [ "$existing_pipeline" != "None" ]; then
+        echo "$pipeline_name"
+        return 0
+    fi
+
+    # Parse source configuration
+    local source_type=$(echo "$source_config" | jq -r '.type')
+    local repo=$(echo "$source_config" | jq -r '.repo')
+    local branch=$(echo "$source_config" | jq -r '.branch')
+    local connection_arn=$(echo "$source_config" | jq -r '.connection_arn // empty')
+
+    # Build source stage based on type
+    local source_stage=""
+    if [ "$source_type" = "GitHub" ]; then
+        source_stage=$(cat <<EOF
+{
+  "name": "Source",
+  "actions": [{
+    "name": "SourceAction",
+    "actionTypeId": {
+      "category": "Source",
+      "owner": "AWS",
+      "provider": "CodeStarSourceConnection",
+      "version": "1"
+    },
+    "configuration": {
+      "ConnectionArn": "$connection_arn",
+      "FullRepositoryId": "$repo",
+      "BranchName": "$branch",
+      "OutputArtifactFormat": "CODE_ZIP"
+    },
+    "outputArtifacts": [{
+      "name": "SourceOutput"
+    }]
+  }]
+}
+EOF
+)
+    elif [ "$source_type" = "CodeCommit" ]; then
+        source_stage=$(cat <<EOF
+{
+  "name": "Source",
+  "actions": [{
+    "name": "SourceAction",
+    "actionTypeId": {
+      "category": "Source",
+      "owner": "AWS",
+      "provider": "CodeCommit",
+      "version": "1"
+    },
+    "configuration": {
+      "RepositoryName": "$repo",
+      "BranchName": "$branch",
+      "PollForSourceChanges": false
+    },
+    "outputArtifacts": [{
+      "name": "SourceOutput"
+    }]
+  }]
+}
+EOF
+)
+    fi
+
+    # Create pipeline structure
+    local pipeline_structure=$(cat <<EOF
+{
+  "pipeline": {
+    "name": "$pipeline_name",
+    "roleArn": "$service_role_arn",
+    "artifactStore": {
+      "type": "S3",
+      "location": "$artifact_bucket"
+    },
+    "stages": [
+      $source_stage,
+      {
+        "name": "Build",
+        "actions": [{
+          "name": "BuildAction",
+          "actionTypeId": {
+            "category": "Build",
+            "owner": "AWS",
+            "provider": "CodeBuild",
+            "version": "1"
+          },
+          "configuration": {
+            "ProjectName": "$build_project_name",
+            "EnvironmentVariables": "[{\"name\":\"BRANCH_NAME\",\"value\":\"$branch\",\"type\":\"PLAINTEXT\"}]"
+          },
+          "inputArtifacts": [{
+            "name": "SourceOutput"
+          }],
+          "outputArtifacts": [{
+            "name": "BuildOutput"
+          }]
+        }]
+      },
+      {
+        "name": "Deploy",
+        "actions": [{
+          "name": "DeployAction",
+          "actionTypeId": {
+            "category": "Deploy",
+            "owner": "AWS",
+            "provider": "CodeDeploy",
+            "version": "1"
+          },
+          "configuration": {
+            "ApplicationName": "$deploy_app_name",
+            "DeploymentGroupName": "$deploy_group_name"
+          },
+          "inputArtifacts": [{
+            "name": "BuildOutput"
+          }]
+        }]
+      }
+    ]
+  }
+}
+EOF
+)
+
+    # Create pipeline
+    local error_output
+    if [ -n "$project_tag" ]; then
+        error_output=$(aws codepipeline create-pipeline \
+            --cli-input-json "$pipeline_structure" \
+            --tags key=Project,value="$project_tag" \
+            --region "$region" \
+            --output text 2>&1)
+    else
+        error_output=$(aws codepipeline create-pipeline \
+            --cli-input-json "$pipeline_structure" \
+            --region "$region" \
+            --output text 2>&1)
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to create CodePipeline: $pipeline_name" >&2
+        echo "Error: $error_output" >&2
+        return 1
+    fi
+
+    echo "$pipeline_name"
+}
+
+# Function to list CodeStar connections
+list_codestar_connections() {
+    local region=${1:-$AWS_REGION}
+
+    aws codestar-connections list-connections \
+        --region "$region" \
+        --query 'Connections[?ConnectionStatus==`AVAILABLE`].[ConnectionName,ConnectionArn,ProviderType]' \
+        --output text 2>/dev/null
+}
+
+# Function to check if pipeline exists
+pipeline_exists() {
+    local pipeline_name=$1
+    local region=${2:-$AWS_REGION}
+
+    aws codepipeline get-pipeline \
+        --name "$pipeline_name" \
+        --region "$region" \
+        --output text &>/dev/null 2>&1
+
+    return $?
+}
