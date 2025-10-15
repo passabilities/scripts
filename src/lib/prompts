@@ -269,14 +269,14 @@ prompt_confirm() {
                 _prompt_clear_line
                 echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}yes${PROMPT_RESET}"
                 eval "$var_name='yes'"
-                break
+                return 0
                 ;;
             [Nn]|[Nn][Oo]|no)
                 _prompt_cursor_up 1
                 _prompt_clear_line
                 echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}no${PROMPT_RESET}"
                 eval "$var_name='no'"
-                break
+                return 1
                 ;;
             *)
                 _prompt_cursor_up 1
@@ -437,6 +437,125 @@ prompt_info() {
 # Usage: prompt_success "Message"
 prompt_success() {
     echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} $1"
+}
+
+# Function: prompt_multiselect
+# Interactive multi-select with checkboxes
+# Usage: prompt_multiselect VAR_NAME "Question" option1 option2 option3 ...
+# Returns: Space-separated string of selected options
+prompt_multiselect() {
+    # Check for interactive terminal
+    if ! _require_interactive; then
+        return 1
+    fi
+
+    local var_name=$1
+    local question=$2
+    shift 2
+    local options=("$@")
+    local selected=()
+    local current=0
+    local key
+
+    # Initialize all as unselected
+    for i in "${!options[@]}"; do
+        selected[$i]=0
+    done
+
+    # Hide cursor
+    _prompt_hide_cursor
+
+    # Trap to ensure cursor is shown on exit
+    trap '_prompt_show_cursor' EXIT INT TERM
+
+    while true; do
+        # Clear and redraw
+        _prompt_clear_line
+        echo -e "${PROMPT_CYAN}${PROMPT_ICON_QUESTION}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}(space to select, enter to confirm)${PROMPT_RESET}"
+
+        # Display options
+        for i in "${!options[@]}"; do
+            local checkbox="[ ]"
+            local color="${PROMPT_RESET}"
+
+            if [ "${selected[$i]}" -eq 1 ]; then
+                checkbox="[✓]"
+            fi
+
+            if [ $i -eq $current ]; then
+                color="${PROMPT_CYAN}"
+                echo -ne "${color}${PROMPT_ICON_POINTER} ${checkbox} ${options[$i]}${PROMPT_RESET}\n"
+            else
+                echo -ne "  ${checkbox} ${options[$i]}\n"
+            fi
+        done
+
+        # Read single key
+        IFS= read -rsn1 key
+
+        # Handle escape sequences (arrow keys)
+        if [ "$key" = $'\x1b' ]; then
+            read -rsn2 key
+            case "$key" in
+                '[A') # Up arrow
+                    ((current--))
+                    if [ $current -lt 0 ]; then
+                        current=$((${#options[@]} - 1))
+                    fi
+                    ;;
+                '[B') # Down arrow
+                    ((current++))
+                    if [ $current -ge ${#options[@]} ]; then
+                        current=0
+                    fi
+                    ;;
+            esac
+        elif [ "$key" = " " ]; then
+            # Toggle selection
+            if [ "${selected[$current]}" -eq 1 ]; then
+                selected[$current]=0
+            else
+                selected[$current]=1
+            fi
+        elif [ "$key" = "" ]; then
+            # Enter key - confirm selection
+            break
+        fi
+
+        # Move cursor back up
+        _prompt_cursor_up $((${#options[@]} + 1))
+    done
+
+    # Show cursor
+    _prompt_show_cursor
+    trap - EXIT INT TERM
+
+    # Clear the menu
+    for i in "${!options[@]}"; do
+        _prompt_clear_line
+        echo ""
+    done
+    _prompt_cursor_up $((${#options[@]} + 1))
+    _prompt_clear_line
+
+    # Build result
+    local result=()
+    for i in "${!options[@]}"; do
+        if [ "${selected[$i]}" -eq 1 ]; then
+            result+=("${options[$i]}")
+        fi
+    done
+
+    # Show confirmation
+    if [ ${#result[@]} -gt 0 ]; then
+        echo -e "${PROMPT_GREEN}${PROMPT_ICON_SUCCESS}${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}${result[*]}${PROMPT_RESET}"
+    else
+        echo -e "${PROMPT_YELLOW}⚠${PROMPT_RESET} ${PROMPT_BOLD}${question}${PROMPT_RESET} ${PROMPT_DIM}(none selected)${PROMPT_RESET}"
+    fi
+
+    # Export result as space-separated string
+    eval "$var_name=\"${result[*]}\""
+    return 0
 }
 
 # Function: prompt_warning

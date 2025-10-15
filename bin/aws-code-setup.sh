@@ -1,0 +1,1 @@
+/home/passa/Documents/projects/DGB/scripts/src/aws/code/setup.sh
